@@ -68,6 +68,7 @@ function inspectFixture() {
   };
 }
 type Scenario = {
+  diffStatus?: number;
   info?: unknown;
   infoStatus?: number;
   services?: unknown;
@@ -92,8 +93,10 @@ async function fixture(
     }
     if (path === '/containers/json?all=1') body = [{ Id: containerId, Labels: {} }];
     else if (path === `/containers/${containerId}/json`) body = inspect;
-    else if (path === `/containers/${containerId}/changes`) body = null;
-    else if (path === '/volumes') body = { Volumes: [{ Name: 'attachments' }] };
+    else if (path === `/containers/${containerId}/changes`) {
+      res.statusCode = scenario.diffStatus ?? 200;
+      body = null;
+    } else if (path === '/volumes') body = { Volumes: [{ Name: 'attachments' }] };
     else if (path === '/info') {
       res.statusCode = scenario.infoStatus ?? 200;
       body = scenario.info ?? { Swarm: { LocalNodeState: 'inactive', ControlAvailable: false } };
@@ -133,6 +136,22 @@ async function fixture(
   }
 }
 const active = { Swarm: { LocalNodeState: 'active', ControlAvailable: true } };
+test('inventory does not scan the writable layer of an already unsupported runtime', async () => {
+  await fixture(
+    {
+      diffStatus: 503,
+      mutate: (c) => {
+        c.HostConfig.NetworkMode = 'host';
+      },
+    },
+    async (client) => {
+      assert.match(
+        (await client.discover()).containers[0]!.blockedReason ?? '',
+        /Runtime especial/,
+      );
+    },
+  );
+});
 for (const [label, scenario] of [
   ['service listing denied', { info: active, serviceStatus: 403 }],
   ['service listing malformed', { info: active, serviceStatus: 200, services: { items: [] } }],

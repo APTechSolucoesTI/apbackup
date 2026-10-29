@@ -177,6 +177,38 @@ export function dockerClient(policy: DockerPolicy, signal: AbortSignal) {
     }
     return null;
   }
+  function unsupportedRuntime(c: ContainerInspect) {
+    return (
+      c.Config.Tty ||
+      c.Config.OpenStdin ||
+      c.HostConfig.Privileged ||
+      c.HostConfig.CapAdd?.length ||
+      c.HostConfig.Devices?.length ||
+      !['default', 'bridge', 'none'].includes(c.HostConfig.NetworkMode) ||
+      c.HostConfig.PidMode ||
+      !['', 'private'].includes(c.HostConfig.IpcMode) ||
+      c.HostConfig.Dns?.length ||
+      c.HostConfig.ExtraHosts?.length ||
+      Object.keys(c.HostConfig.Tmpfs ?? {}).length ||
+      c.HostConfig.VolumesFrom?.length ||
+      c.HostConfig.SecurityOpt?.some((v) => v !== 'no-new-privileges') ||
+      c.HostConfig.Memory ||
+      c.HostConfig.MemoryReservation ||
+      (c.HostConfig.PidsLimit !== null && c.HostConfig.PidsLimit !== 0) ||
+      c.HostConfig.MemorySwap ||
+      c.HostConfig.NanoCpus ||
+      c.HostConfig.CpuShares ||
+      c.HostConfig.CpuQuota ||
+      c.HostConfig.CpuPeriod ||
+      c.HostConfig.CpusetCpus ||
+      c.HostConfig.CpusetMems ||
+      c.HostConfig.Ulimits?.length ||
+      c.HostConfig.GroupAdd?.length ||
+      Object.keys(c.NetworkSettings.Networks).length !== 1 ||
+      Object.keys(c.NetworkSettings.Networks)[0] !==
+        (c.HostConfig.NetworkMode === 'none' ? 'none' : 'bridge')
+    );
+  }
   async function discover(): Promise<DockerCatalog> {
     const containers = await listContainers();
     const volumes = z
@@ -263,6 +295,10 @@ export function dockerClient(policy: DockerPolicy, signal: AbortSignal) {
     }
     const changes = new Map<string, boolean>();
     for (const c of containers) {
+      if (c.Config.Labels?.['com.docker.swarm.service.id'] || db(c) || unsupportedRuntime(c)) {
+        changes.set(c.Id, false);
+        continue;
+      }
       const diff = z
         .array(z.object({ Path: z.string(), Kind: z.number() }))
         .max(100000)
@@ -301,35 +337,7 @@ export function dockerClient(policy: DockerPolicy, signal: AbortSignal) {
               ]
             : [];
         });
-        const unsafe =
-          c.Config.Tty ||
-          c.Config.OpenStdin ||
-          c.HostConfig.Privileged ||
-          c.HostConfig.CapAdd?.length ||
-          c.HostConfig.Devices?.length ||
-          !['default', 'bridge', 'none'].includes(c.HostConfig.NetworkMode) ||
-          c.HostConfig.PidMode ||
-          !['', 'private'].includes(c.HostConfig.IpcMode) ||
-          c.HostConfig.Dns?.length ||
-          c.HostConfig.ExtraHosts?.length ||
-          Object.keys(c.HostConfig.Tmpfs ?? {}).length ||
-          c.HostConfig.VolumesFrom?.length ||
-          c.HostConfig.SecurityOpt?.some((v) => v !== 'no-new-privileges') ||
-          c.HostConfig.Memory ||
-          c.HostConfig.MemoryReservation ||
-          (c.HostConfig.PidsLimit !== null && c.HostConfig.PidsLimit !== 0) ||
-          c.HostConfig.MemorySwap ||
-          c.HostConfig.NanoCpus ||
-          c.HostConfig.CpuShares ||
-          c.HostConfig.CpuQuota ||
-          c.HostConfig.CpuPeriod ||
-          c.HostConfig.CpusetCpus ||
-          c.HostConfig.CpusetMems ||
-          c.HostConfig.Ulimits?.length ||
-          c.HostConfig.GroupAdd?.length ||
-          Object.keys(c.NetworkSettings.Networks).length !== 1 ||
-          Object.keys(c.NetworkSettings.Networks)[0] !==
-            (c.HostConfig.NetworkMode === 'none' ? 'none' : 'bridge');
+        const unsafe = unsupportedRuntime(c);
         const serviceShared = c.Mounts.some((m) =>
           serviceMounts.some(
             (s) =>

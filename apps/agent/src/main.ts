@@ -6,13 +6,31 @@ import { readAgentConfig, saveAgentConfig } from './config.js';
 import { resumePaused } from './watchdog.js';
 import { createAgentClient } from './client.js';
 import { dockerClient } from '../../../packages/connectors/src/docker-client.js';
+import { createCatalogRefresh } from './catalog-refresh.js';
 export async function runAgent(configPath: string, signal: AbortSignal, watchdogOnly = false) {
   const config = await readAgentConfig(configPath);
   const journal = await openJournal(config.journalDirectory);
   const client = createAgentClient(config.baseURL, config.identity);
   const executor = createExecutor(config, journal);
   let pausedSince = 0;
-  let catalogAt = 0;
+  const catalogStop = new AbortController();
+  const catalogSignal = AbortSignal.any([signal, catalogStop.signal]);
+  const catalog = createCatalogRefresh(
+    async () => {
+      if (!config.docker) return;
+      await client.publishDockerCatalog(
+        await dockerClient(
+          config.docker,
+          AbortSignal.any([catalogSignal, AbortSignal.timeout(120000)]),
+        ).discover(),
+      );
+    },
+    catalogSignal,
+    () =>
+      console.error(
+        'Inventário Docker indisponível; comunicação e operações do agente continuam ativas.',
+      ),
+  );
   try {
     if (!(await resumePaused(journal, config.resources)))
       throw new Error('Watchdog requires intervention');
@@ -24,15 +42,7 @@ export async function runAgent(configPath: string, signal: AbortSignal, watchdog
           if (Date.now() - pausedSince > 60000 && !(await resumePaused(journal, config.resources)))
             throw new Error('Watchdog incident');
         } else pausedSince = 0;
-        if (config.docker && Date.now() - catalogAt > 30000) {
-          await client.publishDockerCatalog(
-            await dockerClient(
-              config.docker,
-              AbortSignal.any([signal, AbortSignal.timeout(15000)]),
-            ).discover(),
-          );
-          catalogAt = Date.now();
-        }
+        if (config.docker) catalog.tick();
         const commands = await client.poll();
         for (const command of commands) {
           if (signal.aborted) break;
@@ -61,6 +71,8 @@ export async function runAgent(configPath: string, signal: AbortSignal, watchdog
       }
     }
   } finally {
+    catalogStop.abort();
+    await catalog.close();
     await resumePaused(journal, config.resources);
     await journal.close();
   }
