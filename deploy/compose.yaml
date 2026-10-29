@@ -1,0 +1,100 @@
+name: apbackup
+x-controller: &controller
+  image: ${APBACKUP_CONTROLLER_IMAGE:-apbackup-controller:local}
+  build:
+    context: ..
+    dockerfile: deploy/Dockerfile.controller
+
+services:
+  postgres:
+    image: postgres:17-bookworm@sha256:839fbb5a4942a7758dd93e18b42ea5649807491a0545b5eeeb8f0b8bb11857a5
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: apbackup
+      POSTGRES_USER: apbackup
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Configure a private catalog password}
+    volumes:
+      - catalog:/var/lib/postgresql/data
+    healthcheck:
+      test: [CMD, pg_isready, -U, apbackup, -d, apbackup]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+
+  migrate:
+    <<: *controller
+    command: [node, /app/runtime/migrate.mjs]
+    restart: 'no'
+    environment:
+      DATABASE_URL: ${CATALOG_DATABASE_URL:?Configure the private postgres service URL}
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  web:
+    <<: *controller
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: ${CATALOG_DATABASE_URL:?Configure the private catalog URL}
+      AUTH_BASE_URL: ${AUTH_BASE_URL:?Configure the public HTTPS origin}
+      AUTH_SECRET: ${AUTH_SECRET:?Configure a random authentication secret}
+      VAULT_KEY_BASE64: ${VAULT_KEY_BASE64:?Configure the externally backed-up vault key}
+      VAULT_KEY_REFERENCE: ${VAULT_KEY_REFERENCE:-primary-v1}
+      POSTGRES_ALLOWED_HOSTS: ${POSTGRES_ALLOWED_HOSTS:-}
+      DOKPLOY_ALLOWED_ORIGINS: ${DOKPLOY_ALLOWED_ORIGINS:-}
+    ports:
+      - '127.0.0.1:${WEB_PORT:-4320}:3000'
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+
+  coordinator:
+    <<: *controller
+    command: [node, /app/runtime/coordinator.mjs]
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: ${CATALOG_DATABASE_URL:?Configure the private catalog URL}
+      AUTH_SECRET: ${AUTH_SECRET:?Configure authentication secret}
+      VAULT_KEY_BASE64: ${VAULT_KEY_BASE64:?Configure vault key}
+      VAULT_KEY_REFERENCE: ${VAULT_KEY_REFERENCE:-primary-v1}
+      DOKPLOY_ALLOWED_ORIGINS: ${DOKPLOY_ALLOWED_ORIGINS:-}
+      COORDINATOR_SCHEDULES: ${COORDINATOR_SCHEDULES:-disabled}
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+
+  administrator:
+    <<: *controller
+    profiles: [administration]
+    command: [node, /app/runtime/administrator.mjs, --stdin]
+    # The privileged CLI deliberately accepts only a loopback database.
+    network_mode: service:postgres
+    environment:
+      DATABASE_URL: ${ADMIN_DATABASE_URL:?Configure the same catalog via 127.0.0.1:5432}
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+
+  agent:
+    profiles: [agents]
+    image: apbackup-agent:local
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.agent
+    restart: unless-stopped
+    network_mode: host
+    volumes:
+      - type: bind
+        source: ${AGENT_CONFIG_DIRECTORY:-/etc/apbackup}
+        target: /etc/apbackup
+        read_only: true
+      - type: bind
+        source: ${AGENT_STATE_DIRECTORY:-/var/lib/apbackup}
+        target: /var/lib/apbackup
+      # Only this trusted agent receives host-administration-equivalent Docker access.
+      - type: bind
+        source: /var/run/docker.sock
+        target: /var/run/docker.sock
+
+volumes:
+  catalog:

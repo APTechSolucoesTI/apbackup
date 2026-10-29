@@ -1,0 +1,34 @@
+[Unit]
+Description=APBackup outbound Linux agent
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=apbackup-agent
+Group=apbackup-agent
+WorkingDirectory=/opt/apbackup
+Environment=AGENT_CONFIG=/etc/apbackup/agent.json
+ExecStart=/usr/local/bin/node /opt/apbackup/node_modules/tsx/dist/cli.mjs apps/agent/src/main.ts
+ExecStopPost=/usr/local/bin/node /opt/apbackup/node_modules/tsx/dist/cli.mjs apps/agent/src/main.ts --watchdog
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=45
+KillMode=control-group
+UMask=0077
+StateDirectory=apbackup
+StateDirectoryMode=0700
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+CapabilityBoundingSet=
+ReadWritePaths=/var/lib/apbackup
+
+[Install]
+WantedBy=multi-user.target

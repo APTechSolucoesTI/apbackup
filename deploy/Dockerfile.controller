@@ -1,0 +1,21 @@
+FROM node:24.21.0-bookworm-slim@sha256:d6aa754f16b3197301076f047b5def2f02ea1dbbc2ca920407d46d7ec7f87b20 AS build
+WORKDIR /build
+RUN npm install --global pnpm@10.17.1
+COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
+COPY apps/web/package.json ./apps/web/package.json
+COPY packages/contracts/package.json ./packages/contracts/package.json
+COPY packages/db/package.json ./packages/db/package.json
+COPY packages/security/package.json ./packages/security/package.json
+RUN pnpm install --frozen-lockfile
+COPY . .
+RUN pnpm build && node scripts/build-controller.mjs
+
+FROM node:24.21.0-bookworm-slim@sha256:d6aa754f16b3197301076f047b5def2f02ea1dbbc2ca920407d46d7ec7f87b20 AS runtime
+WORKDIR /app
+ENV NODE_ENV=production NITRO_HOST=0.0.0.0 NITRO_PORT=3000 PORT=3000
+COPY --from=build --chown=node:node /build/apps/web/.output /app/.output
+COPY --from=build --chown=node:node /build/dist/controller /app/runtime
+COPY --from=build --chown=node:node /build/dist/migrations /app/migrations
+USER node
+EXPOSE 3000
+CMD ["node", "/app/.output/server/index.mjs"]

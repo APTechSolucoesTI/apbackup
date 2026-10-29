@@ -1,0 +1,13 @@
+{
+  "name": "Storage da empresa — Sistemas",
+  "kind": "smb",
+  "host": "192.168.3.52",
+  "engine": "restic",
+  "rootPath": "Sistemas/APBackup",
+  "status": "aguardando_configuracao",
+  "configuration": {
+    "backend": "smb",
+    "port": 445,
+    "share": "01 - Backup Remotos"
+  }
+}

@@ -1,0 +1,18 @@
+{
+  "name": "@apbackup/security",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts",
+    "./authorization": "./src/authorization.ts",
+    "./redaction": "./src/redaction.ts",
+    "./vault": "./src/vault.ts"
+  },
+  "dependencies": {
+    "@apbackup/contracts": "workspace:*",
+    "@apbackup/db": "workspace:*",
+    "better-auth": "1.7.14",
+    "zod": "4.6.7"
+  }
+}

@@ -1,0 +1,13 @@
+FROM node:24.21.0-bookworm-slim@sha256:d6aa754f16b3197301076f047b5def2f02ea1dbbc2ca920407d46d7ec7f87b20 AS node
+FROM postgres:17-bookworm@sha256:839fbb5a4942a7758dd93e18b42ea5649807491a0545b5eeeb8f0b8bb11857a5
+COPY --from=node /usr/local/bin/node /usr/local/bin/node
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates curl bzip2 util-linux \
+ && curl --fail --location --proto '=https' --tlsv1.2 https://github.com/restic/restic/releases/download/v0.19.1/restic_0.19.1_linux_amd64.bz2 -o /tmp/restic.bz2 \
+ && echo 'f415415624dcc452f2a02b8c33641791a8c6d6d3b65bbb3543fcf9a25151585c  /tmp/restic.bz2' | sha256sum -c - \
+ && bzip2 -d /tmp/restic.bz2 && install -m 755 /tmp/restic /usr/local/bin/restic \
+ && rm /tmp/restic && rm -rf /var/lib/apt/lists/*
+COPY dist/agent/agent.mjs /app/agent.mjs
+# Mount a private enrolled configuration at /etc/apbackup/agent.json.
+# No database server is started.
+ENTRYPOINT ["node"]
+CMD ["/app/agent.mjs"]

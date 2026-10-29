@@ -1,0 +1,23 @@
+{
+  "baseURL": "https://backup.example.com",
+  "enrollment": "REPLACE_WITH_SINGLE_USE_INVITATION",
+  "externalIdentity": "company-192.168.3.106",
+  "journalDirectory": "/var/lib/apbackup/journal",
+  "artifactRoot": "/var/lib/apbackup/artifacts",
+  "docker": {
+    "socketPath": "/var/run/docker.sock",
+    "helperImage": "REPLACE_WITH_LOCAL_PINNED_NODE_IMAGE_ID",
+    "repositoryRoot": "/var/lib/apbackup/repositories",
+    "directories": {}
+  },
+  "postgresql": {
+    "allowedHosts": ["192.168.3.106"],
+    "repositoryRoot": "/var/lib/apbackup/repositories"
+  },
+  "repositories": {
+    "repositoryRoot": "/var/lib/apbackup/repositories",
+    "mountedRoots": [],
+    "allowedHosts": ["192.168.3.52"]
+  },
+  "resources": {}
+}

@@ -1,0 +1,93 @@
+name: apbackup
+x-controller: &controller
+  image: apbackup/controller:20261029-1634
+  build:
+    context: .
+    dockerfile: deploy/Dockerfile.controller
+  restart: unless-stopped
+  logging: &logging
+    driver: json-file
+    options:
+      max-size: 10m
+      max-file: '3'
+  networks: [backend]
+
+services:
+  postgres:
+    image: postgres:17-bookworm@sha256:839fbb5a4942a7758dd93e18b42ea5649807491a0545b5eeeb8f0b8bb11857a5
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: apbackup
+      POSTGRES_USER: apbackup
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Catalog password required}
+    volumes: [catalog:/var/lib/postgresql/data]
+    networks: [backend]
+    logging: *logging
+    healthcheck:
+      test: [CMD, pg_isready, -U, apbackup, -d, apbackup]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+  migrate:
+    <<: *controller
+    restart: 'no'
+    command: [node, /app/runtime/migrate.mjs]
+    environment:
+      DATABASE_URL: ${CATALOG_DATABASE_URL:?Private catalog URL required}
+    depends_on:
+      postgres: { condition: service_healthy }
+  web:
+    <<: *controller
+    environment:
+      DATABASE_URL: ${CATALOG_DATABASE_URL:?Private catalog URL required}
+      AUTH_BASE_URL: https://apbackup.aptechinfo.app.br
+      AUTH_SECRET: ${AUTH_SECRET:?Authentication secret required}
+      VAULT_KEY_BASE64: ${VAULT_KEY_BASE64:?Vault key required}
+      VAULT_KEY_REFERENCE: primary-v1
+      POSTGRES_ALLOWED_HOSTS: 192.168.3.106
+      DOKPLOY_ALLOWED_ORIGINS: ${DOKPLOY_ALLOWED_ORIGINS:-}
+    ports: ['192.168.3.106:4320:3000']
+    networks: [backend, dokploy-network]
+    depends_on:
+      migrate: { condition: service_completed_successfully }
+    healthcheck:
+      test:
+        [
+          CMD,
+          node,
+          -e,
+          "fetch('http://127.0.0.1:3000/login').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))",
+        ]
+      interval: 20s
+      timeout: 5s
+      retries: 5
+  coordinator:
+    <<: *controller
+    command: [node, /app/runtime/coordinator.mjs]
+    environment:
+      DATABASE_URL: ${CATALOG_DATABASE_URL:?Private catalog URL required}
+      AUTH_SECRET: ${AUTH_SECRET:?Authentication secret required}
+      VAULT_KEY_BASE64: ${VAULT_KEY_BASE64:?Vault key required}
+      VAULT_KEY_REFERENCE: primary-v1
+      DOKPLOY_ALLOWED_ORIGINS: ${DOKPLOY_ALLOWED_ORIGINS:-}
+      COORDINATOR_SCHEDULES: enabled
+    depends_on:
+      migrate: { condition: service_completed_successfully }
+  agent:
+    image: apbackup/agent:20261029-1634
+    build:
+      context: .
+      dockerfile: deploy/Dockerfile.agent
+    restart: unless-stopped
+    network_mode: host
+    volumes:
+      - /etc/apbackup:/etc/apbackup:ro
+      - /var/lib/apbackup:/var/lib/apbackup
+      - /var/run/docker.sock:/var/run/docker.sock
+    logging: *logging
+
+networks:
+  backend: {}
+  dokploy-network: { external: true }
+volumes:
+  catalog: {}

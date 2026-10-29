@@ -1,0 +1,28 @@
+FROM node:24.21.0-bookworm-slim@sha256:d6aa754f16b3197301076f047b5def2f02ea1dbbc2ca920407d46d7ec7f87b20 AS build
+WORKDIR /build
+RUN npm install --global pnpm@10.17.1
+COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
+COPY apps/web/package.json ./apps/web/package.json
+COPY packages/contracts/package.json ./packages/contracts/package.json
+COPY packages/db/package.json ./packages/db/package.json
+COPY packages/security/package.json ./packages/security/package.json
+RUN pnpm install --frozen-lockfile
+COPY . .
+RUN pnpm build:agent
+
+FROM postgres:17-bookworm@sha256:839fbb5a4942a7758dd93e18b42ea5649807491a0545b5eeeb8f0b8bb11857a5
+COPY --from=build /usr/local/bin/node /usr/local/bin/node
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates curl bzip2 unzip util-linux \
+ && curl --fail --location --proto '=https' --tlsv1.2 https://github.com/restic/restic/releases/download/v0.19.1/restic_0.19.1_linux_amd64.bz2 -o /tmp/restic.bz2 \
+ && echo 'f415415624dcc452f2a02b8c33641791a8c6d6d3b65bbb3543fcf9a25151585c  /tmp/restic.bz2' | sha256sum -c - \
+ && bzip2 -d /tmp/restic.bz2 && install -m 755 /tmp/restic /usr/local/bin/restic \
+ && curl --fail --location --proto '=https' --tlsv1.2 https://downloads.rclone.org/v1.75.2/rclone-v1.75.2-linux-amd64.zip -o /tmp/rclone.zip \
+ && echo '349ac8fba6ff65d6247043f1750cdcb518ec5d500ef91463a10d37c0ccdf3702  /tmp/rclone.zip' | sha256sum -c - \
+ && unzip -q /tmp/rclone.zip -d /tmp/rclone \
+ && install -m 755 /tmp/rclone/rclone-v1.75.2-linux-amd64/rclone /usr/local/bin/rclone \
+ && rm -rf /tmp/restic /tmp/rclone /tmp/rclone.zip /var/lib/apt/lists/*
+WORKDIR /app
+COPY --from=build /build/dist/agent/agent.mjs /app/agent.mjs
+ENV AGENT_CONFIG=/etc/apbackup/agent.json
+ENTRYPOINT ["node"]
+CMD ["/app/agent.mjs"]

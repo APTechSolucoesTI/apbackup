@@ -1,0 +1,57 @@
+{
+  "name": "apbackup-platform",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "packageManager": "pnpm@10.17.1",
+  "engines": {
+    "node": ">=24 <25",
+    "pnpm": "10.17.1"
+  },
+  "scripts": {
+    "dev": "pnpm --filter @apbackup/web dev",
+    "dev:auth": "tsx --env-file-if-exists=.env apps/web/src/dev.server.ts",
+    "coordinator": "tsx --env-file-if-exists=.env apps/coordinator/src/main.ts",
+    "agent": "tsx apps/agent/src/main.ts",
+    "test:linux-runtime": "node scripts/linux-runtime.mjs",
+    "test:postgresql": "node scripts/postgresql-runtime.mjs",
+    "test:docker": "node scripts/docker-runtime.mjs",
+    "test:swarm": "node scripts/swarm-runtime.mjs",
+    "build:agent": "node scripts/build-agent.mjs",
+    "auth:bootstrap": "tsx --env-file-if-exists=.env scripts/bootstrap-admin.ts --stdin",
+    "auth:recover": "tsx --env-file-if-exists=.env scripts/bootstrap-admin.ts --stdin --recover",
+    "dev:services": "docker compose --env-file .env -f compose.dev.yaml up -d --wait",
+    "db:migrate": "tsx --env-file-if-exists=.env packages/db/src/cli.ts",
+    "lint": "eslint . --max-warnings 0",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "typecheck": "tsc --noEmit && pnpm --filter @apbackup/web typecheck",
+    "test": "vitest run --config vitest.config.ts",
+    "test:integration": "node scripts/integration.mjs",
+    "test:e2e": "node scripts/integration.mjs --e2e",
+    "build": "tsc -p tsconfig.build.json && node scripts/copy-migrations.mjs && pnpm --filter @apbackup/web build && pnpm test:client-boundary",
+    "dev:catalog": "tsx watch --env-file-if-exists=.env packages/db/src/dev.ts",
+    "test:client-boundary": "node scripts/check-client-boundary.mjs",
+    "inventory:import": "tsx --env-file-if-exists=.env scripts/import-inventory.ts --stdin"
+  },
+  "dependencies": {
+    "@apbackup/contracts": "workspace:*",
+    "@apbackup/db": "workspace:*",
+    "better-auth": "1.7.14",
+    "drizzle-orm": "0.45.4",
+    "pg": "8.23.1",
+    "zod": "4.6.7"
+  },
+  "devDependencies": {
+    "@eslint/js": "10.0.1",
+    "@playwright/test": "1.64.1",
+    "@types/node": "24.19.2",
+    "@types/pg": "8.23.1",
+    "eslint": "10.13.0",
+    "prettier": "3.9.10",
+    "tsx": "4.23.15",
+    "typescript": "5.8.3",
+    "typescript-eslint": "8.72.1",
+    "vitest": "5.0.5"
+  }
+}

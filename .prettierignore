@@ -1,0 +1,10 @@
+node_modules/
+dist/
+pnpm-lock.yaml
+test-results/
+playwright-report/
+coverage/
+**/.output/
+**/.nitro/
+**/.tanstack/
+**/routeTree.gen.ts
