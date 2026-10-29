@@ -10,6 +10,22 @@ destino. PBS/Proxmox permanecem fora do produto.
 [guia de instalação](docs/installation.md). Agendas e destinos só entram em operação
 após configuração explícita; não há credenciais nem backups reais pré-carregados.
 
+### Produção APTech
+
+O fluxo é `GitHub main → Dokploy → docker-compose.yml`, na raiz deste repositório.
+O painel usa `https://apbackup.aptechinfo.app.br`, publicado pelo túnel existente.
+Um webhook exclusivo do repositório aciona o Compose do APBackup; seu endereço
+privado e as variáveis de ambiente ficam fora do código. A terminação HTTPS é
+feita pela Cloudflare, e o Dokploy encaminha o serviço web na porta interna3000.
+
+Na instalação assistida, servidor/agente e destinos local/NAS são cadastrados e
+verificados. Isso não significa que os sistemas existentes já tenham backups:
+após o primeiro login, configure o autenticador em **Segurança**, selecione os
+recursos, crie os planos e valide uma captura manual antes de habilitar as agendas.
+O padrão diário é03:00 America/Sao_Paulo, retenção7dias com proteções do último
+ponto verificado e de operações em andamento. O agente atualiza o inventário
+em segundo plano; falha nessa atualização não interrompe a comunicação dos jobs.
+
 O plano captura uma vez em um repositório local e replica esse mesmo ponto para
 destinos independentes (S3, SMB/SFTP, diretório montado aprovado ou Drive autorizado).
 O painel mostra os resultados por destino, repete uma cópia que falhou e permite
