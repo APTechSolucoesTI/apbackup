@@ -4,7 +4,61 @@ import {
   postgresDatabaseNameSchema,
   agentCommandSchema,
   postgresSelectionSchema,
+  postgresRuntimeSecretsSchema,
 } from '@apbackup/contracts';
+import { postgresClient } from '../../packages/connectors/src/postgresql-connection.js';
+
+test('Docker-local PostgreSQL accepts no password and requires an exact safe container identity', () => {
+  const input = {
+    serverId: crypto.randomUUID(),
+    name: 'Shared local',
+    transport: 'docker_exec',
+    container: 'supabase-db',
+    username: 'postgres',
+  };
+  expect(postgresConnectionInputSchema.safeParse(input).success).toBe(true);
+  for (const container of ['', '/supabase-db', '-options', 'db;id', 'db/name'])
+    expect(postgresConnectionInputSchema.safeParse({ ...input, container }).success).toBe(false);
+  expect(
+    postgresRuntimeSecretsSchema.safeParse({
+      connection: { transport: 'docker_exec', container: 'supabase-db', username: 'postgres' },
+      database: 'postgres',
+      repositoryPath: 'repo',
+      repositoryPassword: 'secret',
+    }).success,
+  ).toBe(true);
+  expect(
+    postgresConnectionInputSchema.safeParse({
+      ...input,
+      transport: 'tcp',
+      container: undefined,
+      host: 'localhost',
+    }).success,
+  ).toBe(false);
+});
+
+test('Docker-local configuration never enters TCP and remote TCP still requires verified TLS', () => {
+  const local = postgresConnectionInputSchema.parse({
+    serverId: crypto.randomUUID(),
+    name: 'Local',
+    transport: 'docker_exec',
+    container: 'supabase-db',
+    username: 'postgres',
+  });
+  expect(() => postgresClient(local, 'postgres')).toThrow(/Docker/);
+  expect(() =>
+    postgresClient(
+      {
+        host: 'remote.example.test',
+        port: 5432,
+        username: 'postgres',
+        password: 'private',
+        sslMode: 'disable',
+      },
+      'postgres',
+    ),
+  ).toThrow(/TLS/);
+});
 test('shared PostgreSQL supports an explicit schema scope or whole source database with an isolated target', () => {
   const connectionId = crypto.randomUUID();
   expect(

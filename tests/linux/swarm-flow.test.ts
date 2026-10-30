@@ -73,8 +73,11 @@ test('real isolated Swarm return recovers crashed scaled-up service to historica
       TaskTemplate: {
         ContainerSpec: {
           Image: image,
-          Command: ['node'],
-          Args: ['-e', 'setInterval(()=>{},10000)'],
+          Command: i === 1 ? ['sh', '-c'] : ['node'],
+          Args:
+            i === 1
+              ? ["node -e 'setInterval(()=>{},10000)' # migration"]
+              : ['-e', 'setInterval(()=>{},10000)'],
           Env: ['VERSION=historical', 'DATABASE_URL=old-database', 'REDIS_URL=old-queue'],
           Mounts: i ? [{ Type: 'volume', Source: 'owned-files', Target: '/data' }] : [],
         },
@@ -112,6 +115,14 @@ test('real isolated Swarm return recovers crashed scaled-up service to historica
         role: roles[i],
         preserveEnvironmentKeys: ['DATABASE_URL', 'REDIS_URL'],
         startupReviewed: true,
+        ...(i === 1
+          ? {
+              restoreStartup: {
+                entrypoint: ['node'],
+                command: ['-e', 'setInterval(()=>{},10000)'],
+              },
+            }
+          : {}),
       })),
     },
     repositoryPath: 'swarm-test',

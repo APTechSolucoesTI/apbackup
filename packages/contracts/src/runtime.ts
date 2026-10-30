@@ -64,6 +64,11 @@ const operationSchema = z.discriminatedUnion('kind', [
       )
       .max(3)
       .optional(),
+    targetContainers: z
+      .array(z.strictObject({ id: z.string().regex(/^[a-f0-9]{64}$/), name: dockerNameSchema }))
+      .min(1)
+      .max(3)
+      .optional(),
     redeployGuardConfirmed: z.boolean().optional(),
   }),
   z.strictObject({

@@ -15,6 +15,7 @@ import { dockerCatalogSchema } from '@apbackup/contracts';
 import { verifiedPoints } from '../../../../packages/db/src/repositories/coverage.js';
 import { encryptSecret } from '../../../../packages/security/src/vault.js';
 import type { PlatformDatabase } from '@apbackup/db';
+import { ConfigurationError } from '../../../../packages/db/src/repositories/shared.js';
 import { createAgentRegistry } from '../../../../apps/agent/src/enrollment.js';
 import {
   createExecutionStore,
@@ -241,6 +242,11 @@ export function createRuntimeApi(
           ).rows[0];
           if (!point) throw new Error('Recovery point unavailable');
           const proof = postgresEvidenceSchema.parse(point.postgresql_evidence);
+          if (proof.requiresCompatibleCluster)
+            throw new ConfigurationError(
+              409,
+              'Este backup do Supabase exige recuperação em uma instalação compatível, com suas chaves originais. O retorno automático para um banco novo não é compatível com estas extensões.',
+            );
           if (proof.database === v.targetDatabase)
             throw new Error('Restore must use a new database');
           const scope = {
@@ -316,7 +322,7 @@ export function createRuntimeApi(
       }
       return Response.json({ error: 'Página não encontrada.' }, { status: 404 });
     } catch (error) {
-      if (error instanceof AccessError)
+      if (error instanceof AccessError || error instanceof ConfigurationError)
         return Response.json({ error: error.message }, { status: error.status });
       if (error instanceof z.ZodError || error instanceof SyntaxError)
         return Response.json({ error: 'Verifique os dados informados.' }, { status: 400 });

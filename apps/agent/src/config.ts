@@ -22,11 +22,22 @@ export const agentConfigSchema = z.strictObject({
       helperImage: z.string().regex(/^sha256:[a-f0-9]{64}$/),
       repositoryRoot: absolutePath,
       directories: z.record(z.string().regex(/^[A-Za-z0-9][A-Za-z0-9_.-]{0,99}$/), absolutePath),
+      dynamicOverlayNetworks: z
+        .record(
+          z.string().regex(/^[A-Za-z0-9][A-Za-z0-9_.-]{0,99}$/),
+          z.string().regex(/^[a-zA-Z0-9]{12,64}$/),
+        )
+        .optional(),
     })
     .optional(),
   postgresql: z
     .strictObject({
-      allowedHosts: z.array(z.string().regex(/^[a-zA-Z0-9.-]+$/)).min(1),
+      allowedHosts: z.array(z.string().regex(/^[a-zA-Z0-9.-]+$/)).default([]),
+      dockerSocketPath: absolutePath.optional(),
+      allowedDockerContainers: z
+        .array(z.string().regex(/^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$/))
+        .max(100)
+        .default([]),
       repositoryRoot: absolutePath,
     })
     .optional(),

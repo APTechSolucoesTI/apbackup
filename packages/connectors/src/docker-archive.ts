@@ -97,6 +97,11 @@ export async function inspectDataTar(path: string, signal: AbortSignal) {
     records.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
     return {
       entries,
+      rootKind: records.some((r) => r.name === '.' && r.type === 'directory')
+        ? ('directory' as const)
+        : records.length === 1 && records[0]?.name === 'data' && records[0].type === 'file'
+          ? ('file' as const)
+          : ('other' as const),
       fingerprint: createHash('sha256').update(JSON.stringify(records)).digest('hex'),
     };
   } finally {

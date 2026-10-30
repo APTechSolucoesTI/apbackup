@@ -10,6 +10,8 @@ export interface DockerPolicy {
   allowedHosts?: readonly string[] | undefined;
   /** Exact daemon-host directories. Never accepted from the console or a command. */
   directories: Readonly<Record<string, string>>;
+  /** Exact reviewed external overlay IDs whose endpoints may use fresh dynamic IPs. */
+  dynamicOverlayNetworks?: Readonly<Record<string, string>> | undefined;
 }
 const mountSchema = z.object({
   Type: z.string(),
@@ -54,6 +56,7 @@ export const containerInspectSchema = z.object({
     Devices: z.array(z.unknown()).nullable(),
     CapDrop: z.array(z.string()).nullable(),
     ReadonlyRootfs: z.boolean(),
+    Init: z.boolean().nullable().optional(),
     Dns: z.array(z.string()).nullable(),
     ExtraHosts: z.array(z.string()).nullable(),
     Tmpfs: z.record(z.string(), z.string()).nullable().optional(),
@@ -72,6 +75,17 @@ export const containerInspectSchema = z.object({
     Ulimits: z.array(z.unknown()).nullable(),
     GroupAdd: z.array(z.string()).nullable(),
     Binds: z.array(z.string()).nullable(),
+    Mounts: z
+      .array(
+        z.object({
+          Type: z.string(),
+          Source: z.string().optional(),
+          Target: z.string(),
+          ReadOnly: z.boolean().optional(),
+          VolumeOptions: z.object({ Subpath: z.string().optional() }).optional(),
+        }),
+      )
+      .optional(),
     PortBindings: z
       .record(
         z.string(),
@@ -100,6 +114,15 @@ export const containerInspectSchema = z.object({
   }),
 });
 export type ContainerInspect = z.infer<typeof containerInspectSchema>;
+export const dockerMountsOverlap = (
+  a: ContainerInspect['Mounts'][number],
+  b: ContainerInspect['Mounts'][number],
+) =>
+  a.Type === 'volume' && b.Type === 'volume'
+    ? a.Name === b.Name
+    : a.Source === b.Source ||
+      a.Source.startsWith(b.Source.replace(/\/$/, '') + '/') ||
+      b.Source.startsWith(a.Source.replace(/\/$/, '') + '/');
 const id = (v: string) => encodeURIComponent(v);
 export function dockerClient(policy: DockerPolicy, signal: AbortSignal) {
   if (
@@ -177,14 +200,15 @@ export function dockerClient(policy: DockerPolicy, signal: AbortSignal) {
     }
     return null;
   }
-  function unsupportedRuntime(c: ContainerInspect) {
+  function unsupportedRuntime(c: ContainerInspect, allowNetworks = false) {
     return (
       c.Config.Tty ||
       c.Config.OpenStdin ||
       c.HostConfig.Privileged ||
       c.HostConfig.CapAdd?.length ||
       c.HostConfig.Devices?.length ||
-      !['default', 'bridge', 'none'].includes(c.HostConfig.NetworkMode) ||
+      (!allowNetworks && !['default', 'bridge', 'none'].includes(c.HostConfig.NetworkMode)) ||
+      (allowNetworks && /^(host|container:|service:)/.test(c.HostConfig.NetworkMode)) ||
       c.HostConfig.PidMode ||
       !['', 'private'].includes(c.HostConfig.IpcMode) ||
       c.HostConfig.Dns?.length ||
@@ -204,9 +228,10 @@ export function dockerClient(policy: DockerPolicy, signal: AbortSignal) {
       c.HostConfig.CpusetMems ||
       c.HostConfig.Ulimits?.length ||
       c.HostConfig.GroupAdd?.length ||
-      Object.keys(c.NetworkSettings.Networks).length !== 1 ||
-      Object.keys(c.NetworkSettings.Networks)[0] !==
-        (c.HostConfig.NetworkMode === 'none' ? 'none' : 'bridge')
+      (!allowNetworks &&
+        (Object.keys(c.NetworkSettings.Networks).length !== 1 ||
+          Object.keys(c.NetworkSettings.Networks)[0] !==
+            (c.HostConfig.NetworkMode === 'none' ? 'none' : 'bridge')))
     );
   }
   async function discover(): Promise<DockerCatalog> {
@@ -368,6 +393,13 @@ export function dockerClient(policy: DockerPolicy, signal: AbortSignal) {
           state: c.State.Status,
           mounts,
           blockedReason: reason,
+          environmentKeys: (c.Config.Env ?? []).map((e) => e.split('=')[0]!),
+          ...(c.Config.Labels?.['com.docker.compose.project']
+            ? { composeProject: c.Config.Labels['com.docker.compose.project'] }
+            : {}),
+          ...(c.Config.Labels?.['com.docker.compose.service']
+            ? { composeService: c.Config.Labels['com.docker.compose.service'] }
+            : {}),
         };
       }),
       volumes: (volumes.Volumes ?? []).map((v) => ({
@@ -380,7 +412,13 @@ export function dockerClient(policy: DockerPolicy, signal: AbortSignal) {
     });
   }
   async function helper(
-    mount: { Type: 'volume' | 'bind'; Source: string; Target: string; ReadOnly: boolean },
+    mount: {
+      Type: 'volume' | 'bind';
+      Source: string;
+      Target: string;
+      ReadOnly: boolean;
+      VolumeOptions?: { Subpath: string };
+    },
     operation: string,
     directoryName?: string,
   ) {
@@ -391,7 +429,11 @@ export function dockerClient(policy: DockerPolicy, signal: AbortSignal) {
           "const fs=require('node:fs');const p='/data/'+process.argv[1];fs.mkdirSync(p,{mode:448});",
           directoryName,
         ]
-      : ['/usr/bin/tar', '--format=ustar', '--create', '--file=-', '--directory', '/data', '.'];
+      : [
+          '/usr/local/bin/node',
+          '-e',
+          "const fs=require('node:fs'),cp=require('node:child_process');const s=fs.lstatSync('/data');if(!s.isDirectory()&&!s.isFile())process.exit(42);const a=['--format=ustar','--create','--file=-','--directory',s.isFile()?'/':'/data',s.isFile()?'data':'.'];const r=cp.spawnSync('/usr/bin/tar',a,{stdio:'inherit'});process.exit(r.status??1)",
+        ];
     const body = {
       Image: policy.helperImage,
       Cmd: command,
@@ -400,6 +442,9 @@ export function dockerClient(policy: DockerPolicy, signal: AbortSignal) {
         NetworkMode: 'none',
         ReadonlyRootfs: true,
         CapDrop: ['ALL'],
+        // Read-only capture must traverse application-owned 0700 directories and
+        // read 0600 files without changing their ownership or permissions.
+        CapAdd: ['DAC_READ_SEARCH'],
         SecurityOpt: ['no-new-privileges'],
         Mounts: [mount],
       },
@@ -413,7 +458,13 @@ export function dockerClient(policy: DockerPolicy, signal: AbortSignal) {
     await json('DELETE', `/containers/${id(container)}?force=1&v=0`);
   }
   async function capture(
-    mount: { Type: 'volume' | 'bind'; Source: string; Target: string; ReadOnly: boolean },
+    mount: {
+      Type: 'volume' | 'bind';
+      Source: string;
+      Target: string;
+      ReadOnly: boolean;
+      VolumeOptions?: { Subpath: string };
+    },
     operation: string,
     output: string,
   ) {
@@ -450,6 +501,141 @@ export function dockerClient(policy: DockerPolicy, signal: AbortSignal) {
     }
   }
   return {
+    async directoryMetadata(container: string, path: string) {
+      let response: IncomingMessage;
+      try {
+        response = await raw(
+          'GET',
+          `/containers/${id(container)}/archive?path=${encodeURIComponent(path)}`,
+        );
+      } catch (error) {
+        if (
+          signal.aborted ||
+          !(error instanceof Error) ||
+          !error.message.endsWith('/archive (404)')
+        )
+          throw error;
+        const current = await inspect(container);
+        if (!current.State.Running || !current.Mounts.some((m) => m.Type === 'bind')) throw error;
+        // A deleted bind source can make the daemon's archive remount fail even
+        // for unrelated directories. Read metadata in the existing namespace;
+        // keep the application's user and execute no shell or startup command.
+        const exec = z.object({ Id: z.string() }).parse(
+          await json('POST', `/containers/${id(container)}/exec`, {
+            AttachStdout: true,
+            AttachStderr: true,
+            // Metadata does not need application configuration. Clear every
+            // inherited key, including preload/coverage/compile-cache knobs.
+            Env: [
+              ...(current.Config.Env ?? []).map((value) => value.split('=')[0] + '='),
+              'NODE_OPTIONS=',
+              'NODE_PATH=',
+              'LD_PRELOAD=',
+              'NODE_COMPILE_CACHE=',
+              'NODE_V8_COVERAGE=',
+              'NODE_REDIRECT_WARNINGS=',
+              'NODE_DISABLE_COMPILE_CACHE=1',
+            ],
+            WorkingDir: '/',
+            Cmd: [
+              '/usr/local/bin/node',
+              '-e',
+              "const s=require('node:fs').lstatSync(process.argv[1]);if(!s.isDirectory())process.exit(42);process.stdout.write(JSON.stringify({mode:s.mode&4095,uid:s.uid,gid:s.gid}));",
+              path,
+            ],
+          }),
+        );
+        const output = await raw('POST', `/exec/${id(exec.Id)}/start`, {
+          Detach: false,
+          Tty: false,
+        });
+        let bytes = Buffer.alloc(0);
+        for await (const chunk of output) {
+          bytes = Buffer.concat([bytes, Buffer.from(chunk as Uint8Array)]);
+          if (bytes.length > 4096) {
+            output.destroy();
+            throw new Error('Directory metadata limit', { cause: error });
+          }
+        }
+        const state = z
+          .object({ Running: z.literal(false), ExitCode: z.literal(0) })
+          .parse(await json('GET', `/exec/${id(exec.Id)}/json`));
+        void state;
+        let position = 0,
+          text = '';
+        while (position < bytes.length) {
+          if (position + 8 > bytes.length)
+            throw new Error('Truncated metadata frame', { cause: error });
+          const length = bytes.readUInt32BE(position + 4);
+          if (bytes[position] !== 1 || position + 8 + length > bytes.length)
+            throw new Error('Unexpected metadata diagnostics', { cause: error });
+          text += bytes.subarray(position + 8, position + 8 + length).toString('utf8');
+          position += 8 + length;
+        }
+        return z
+          .strictObject({
+            mode: z.number().int().min(0).max(4095),
+            uid: z.number().int().nonnegative(),
+            gid: z.number().int().nonnegative(),
+          })
+          .parse(JSON.parse(text));
+      }
+      let prefix = Buffer.alloc(0);
+      try {
+        for await (const chunk of response) {
+          prefix = Buffer.concat([prefix, Buffer.from(chunk as Uint8Array)]);
+          if (prefix.length >= 512) break;
+        }
+      } finally {
+        response.destroy();
+      }
+      if (prefix.length < 512 || prefix.subarray(156, 157).toString() !== '5')
+        throw new Error('Expected directory archive metadata');
+      const octal = (start: number, length: number) => {
+        const value = prefix
+          .subarray(start, start + length)
+          .toString()
+          .split('\0')[0]!
+          .trim();
+        if (!/^[0-7]+$/.test(value)) throw new Error('Invalid directory metadata');
+        return parseInt(value, 8);
+      };
+      return { mode: octal(100, 8), uid: octal(108, 8), gid: octal(116, 8) };
+    },
+    async swarmMounts() {
+      const mode = z
+        .object({ Swarm: z.object({ LocalNodeState: z.string(), ControlAvailable: z.boolean() }) })
+        .parse(await json('GET', '/info')).Swarm;
+      if (mode.LocalNodeState === 'inactive' && !mode.ControlAvailable) return [];
+      if (mode.LocalNodeState !== 'active' || !mode.ControlAvailable)
+        throw new Error('Unknown Swarm mount ownership');
+      return z
+        .array(
+          z.object({
+            Spec: z.object({
+              TaskTemplate: z.object({
+                ContainerSpec: z.object({
+                  Mounts: z
+                    .array(
+                      z
+                        .object({
+                          Type: z.enum(['volume', 'bind', 'tmpfs']),
+                          Source: z.string().optional(),
+                          ReadOnly: z.boolean().optional(),
+                        })
+                        .refine(
+                          (m) => m.Type === 'tmpfs' || (!!m.Source && !m.Source.includes('{{')),
+                        ),
+                    )
+                    .optional(),
+                }),
+              }),
+            }),
+          }),
+        )
+        .parse(await json('GET', '/services'))
+        .flatMap((s) => s.Spec.TaskTemplate.ContainerSpec.Mounts ?? []);
+    },
     async changes(container: string) {
       return z
         .array(z.object({ Path: z.string(), Kind: z.number().int() }))
@@ -510,6 +696,11 @@ export function dockerClient(policy: DockerPolicy, signal: AbortSignal) {
         );
     },
     discover,
+    listContainers,
+    unsupportedRuntime,
+    async network(name: string) {
+      return json('GET', `/networks/${id(name)}`);
+    },
     inspect,
     mountSource,
     capture,
@@ -555,6 +746,25 @@ export function dockerClient(policy: DockerPolicy, signal: AbortSignal) {
         .object({ Volumes: z.array(z.object({ Name: z.string() })).nullable() })
         .parse(await json('GET', '/volumes'));
       if (result.Volumes?.some((v) => v.Name === name)) throw new Error('Target volume exists');
+    },
+    async restoredVolume(name: string, operation: string) {
+      const result = z
+        .object({ Name: z.string(), Labels: z.record(z.string(), z.string()).nullable() })
+        .parse(await json('GET', `/volumes/${id(name)}`));
+      return result.Name === name && result.Labels?.['apbackup.restore'] === operation;
+    },
+    async assertLocalVolume(name: string) {
+      const result = z
+        .object({
+          Name: z.string(),
+          Driver: z.literal('local'),
+          Options: z.record(z.string(), z.string()).nullable(),
+        })
+        .parse(await json('GET', `/volumes/${id(name)}`));
+      if (result.Name !== name || Object.keys(result.Options ?? {}).length)
+        throw new Error(
+          'Only local volumes without external driver options have provable group ownership',
+        );
     },
     async prepareDirectory(source: string, name: string, operation: string) {
       if (!/^[A-Za-z0-9][A-Za-z0-9_.-]{0,99}$/.test(name)) throw new Error('Unsafe target name');

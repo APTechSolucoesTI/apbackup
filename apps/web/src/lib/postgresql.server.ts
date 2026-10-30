@@ -71,6 +71,11 @@ export function createPostgresApi(
       }
       if (path === '/connections' && request.method === 'POST') {
         const v = postgresConnectionInputSchema.parse(await input());
+        if (v.transport === 'docker_exec')
+          throw new ConfigurationError(
+            409,
+            'Conexões Docker locais são configuradas pelo instalador administrativo no servidor do agente. A descoberta pela aplicação web não executa Docker.',
+          );
         try {
           assertApprovedPostgresHost(v.host);
         } catch {
@@ -124,6 +129,11 @@ export function createPostgresApi(
       async function discover(id: string) {
         const config = await readPostgresConnection(db, org, uuidSchema.parse(id));
         if (!config) throw new ConfigurationError(404, 'Conexão não encontrada.');
+        if (config.transport === 'docker_exec')
+          throw new ConfigurationError(
+            409,
+            'A descoberta Docker local deve ser validada no servidor pelo instalador administrativo; o servidor web não acessa o socket Docker do agente.',
+          );
         assertApprovedPostgresHost(config.host);
         const client = postgresClient(config, 'postgres');
         try {
@@ -275,22 +285,25 @@ export function createPostgresApi(
         return Response.json(await createResourcePlan(db, org, v), { status: 201, headers });
       }
       if (path === '/overview' && request.method === 'GET') {
+        const profileVersionId = uuidSchema
+          .optional()
+          .parse(new URL(request.url).searchParams.get('profileVersionId') ?? undefined);
         const plans = (
           await db.pool.query(
-            `select p.id,p.name,b.database_name as database,p.enabled,s.enabled as "scheduleEnabled",to_char(s.local_time,'HH24:MI') as "localTime",s.timezone,(select jsonb_build_object('id',e.id,'status',e.status) from executions e where e.organization_id=p.organization_id and e.plan_id=p.id order by e.created_at desc,e.id limit 1) as latest from plans p join postgresql_bindings b on b.organization_id=p.organization_id and b.profile_version_id=p.profile_version_id join schedules s on s.organization_id=p.organization_id and s.plan_id=p.id where p.organization_id=$1 and p.archived_at is null order by p.created_at desc limit 100`,
-            [org],
+            `select p.id,p.name,b.database_name as database,p.enabled,s.enabled as "scheduleEnabled",to_char(s.local_time,'HH24:MI') as "localTime",s.timezone,(select jsonb_build_object('id',e.id,'status',e.status) from executions e where e.organization_id=p.organization_id and e.plan_id=p.id order by e.created_at desc,e.id limit 1) as latest from plans p join postgresql_bindings b on b.organization_id=p.organization_id and b.profile_version_id=p.profile_version_id join schedules s on s.organization_id=p.organization_id and s.plan_id=p.id where p.organization_id=$1 and ($2::uuid is null or p.profile_version_id=$2) and p.archived_at is null order by p.created_at desc limit 100`,
+            [org, profileVersionId ?? null],
           )
         ).rows;
         const points = (
           await db.pool.query(
-            `select p.id,b.database_name as database,p.captured_at as "capturedAt",d.native_snapshot_id as "snapshotId",d.verification_scope as verification from recovery_points p join postgresql_bindings b on b.organization_id=p.organization_id and b.profile_version_id=p.profile_version_id join destination_results d on d.organization_id=p.organization_id and d.recovery_point_id=p.id where p.organization_id=$1 and p.status='complete' and d.status='concluida' and d.verified_at is not null order by p.captured_at desc limit 100`,
-            [org],
+            `select p.id,b.database_name as database,p.captured_at as "capturedAt",d.native_snapshot_id as "snapshotId",d.verification_scope as verification,coalesce((d.postgresql_evidence->>'requiresCompatibleCluster')::boolean,false) as "requiresCompatibleCluster" from recovery_points p join postgresql_bindings b on b.organization_id=p.organization_id and b.profile_version_id=p.profile_version_id join lateral(select dr.* from destination_results dr where dr.organization_id=p.organization_id and dr.recovery_point_id=p.id and dr.status='concluida' and dr.verified_at is not null and dr.removed_at is null and not dr.retention_pending order by dr.id limit 1)d on true where p.organization_id=$1 and ($2::uuid is null or p.profile_version_id=$2) and p.status='complete' and d.status='concluida' and d.verified_at is not null order by p.captured_at desc limit 100`,
+            [org, profileVersionId ?? null],
           )
         ).rows;
         const restores = (
           await db.pool.query(
-            `select e.id,r.scope->>'targetDatabase' as database,e.status from restore_requests r join executions e on e.organization_id=r.organization_id and e.id=r.execution_id where r.organization_id=$1 and r.scope->>'kind'='postgresql_restore' order by e.created_at desc limit 100`,
-            [org],
+            `select e.id,r.scope->>'targetDatabase' as database,e.status from restore_requests r join executions e on e.organization_id=r.organization_id and e.id=r.execution_id where r.organization_id=$1 and ($2::uuid is null or e.profile_version_id=$2) and r.scope->>'kind'='postgresql_restore' order by e.created_at desc limit 100`,
+            [org, profileVersionId ?? null],
           )
         ).rows;
         return Response.json({ plans, points, restores }, { headers });

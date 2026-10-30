@@ -1,8 +1,14 @@
-import type pg from 'pg';
 import { postgresSchemaNameSchema } from '@apbackup/contracts';
 
+export interface PostgresQueryClient {
+  query<T extends Record<string, unknown>>(
+    sql: string,
+    parameters?: readonly unknown[],
+  ): Promise<{ rows: T[]; rowCount: number | null }>;
+}
+
 /** Catalog dependencies are conservative. Function-body dynamic SQL is not inferable from pg_depend. */
-export async function discoverPostgresSchemas(client: pg.Client) {
+export async function discoverPostgresSchemas(client: PostgresQueryClient) {
   const result = await client.query<{ name: string }>(
     "select nspname as name from pg_namespace where has_schema_privilege(current_user,oid,'USAGE') and nspname not like 'pg_%' and nspname <> 'information_schema' order by nspname",
   );
@@ -11,7 +17,10 @@ export async function discoverPostgresSchemas(client: pg.Client) {
     selectable: postgresSchemaNameSchema.safeParse(r.name).success,
   }));
 }
-export async function inspectPostgresSchemaScope(client: pg.Client, schemas: readonly string[]) {
+export async function inspectPostgresSchemaScope(
+  client: PostgresQueryClient,
+  schemas: readonly string[],
+) {
   if (!schemas.length) return { isolated: true, dependencies: [] as string[] };
   const available = await discoverPostgresSchemas(client);
   if (schemas.some((s) => !available.some((a) => a.name === s && a.selectable)))

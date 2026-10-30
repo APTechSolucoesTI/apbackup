@@ -3,18 +3,53 @@ import { z } from 'zod';
 import { uuidSchema, sha256Schema } from './common.js';
 export const dockerNameSchema = z.string().regex(/^[A-Za-z0-9][A-Za-z0-9_.-]{0,99}$/);
 export const dockerIdSchema = z.string().regex(/^[a-f0-9]{64}$/);
+const reviewedStartupSchema = z.strictObject({
+  command: z.array(z.string().max(8192)).min(1).max(100),
+  entrypoint: z.array(z.string().max(8192)).max(100).optional(),
+});
+const member = {
+  role: z.enum(['frontend', 'api', 'worker']),
+  preserveEnvironmentKeys: z.array(z.string().regex(/^[A-Za-z_][A-Za-z0-9_]*$/)).max(100),
+  startupReviewed: z.literal(true),
+  restoreStartup: reviewedStartupSchema.optional(),
+};
 export const dockerSelectionSchema = z
   .strictObject({
     serverId: uuidSchema,
-    kind: z.enum(['volume', 'directory', 'container', 'swarm']),
+    kind: z.enum(['volume', 'directory', 'container', 'swarm', 'compose']),
     identity: dockerNameSchema,
     services: z
       .array(
         z.strictObject({
           id: z.string().regex(/^[a-zA-Z0-9]{6,64}$/),
-          role: z.enum(['frontend', 'api', 'worker']),
-          preserveEnvironmentKeys: z.array(z.string().regex(/^[A-Za-z_][A-Za-z0-9_]*$/)).max(100),
-          startupReviewed: z.literal(true),
+          ...member,
+        }),
+      )
+      .min(1)
+      .max(3)
+      .optional(),
+    containers: z
+      .array(
+        z.strictObject({
+          id: dockerIdSchema.optional(),
+          name: dockerNameSchema,
+          service: dockerNameSchema,
+          ...member,
+          emptyReadOnlyMounts: z
+            .array(z.string().regex(/^\/(?!.*(?:^|\/)\.\.(?:\/|$))[^\0]*$/))
+            .max(10)
+            .optional(),
+          ephemeralPaths: z
+            .array(
+              z
+                .string()
+                .regex(
+                  /^(?:\/(?:[^/]+\/)*\.next\/cache|\/root\/\.cache\/(?:prisma|checkpoint-nodejs)|\/tmp\/node-compile-cache)$/,
+                )
+                .refine((path) => !path.includes('\0') && !path.split('/').includes('..')),
+            )
+            .max(10)
+            .optional(),
         }),
       )
       .min(1)
@@ -32,6 +67,18 @@ export const dockerSelectionSchema = z
       c.addIssue({
         code: 'custom',
         message: 'Selecione serviços e papéis explícitos, sem duplicação.',
+      });
+    if (
+      v.kind === 'compose'
+        ? !v.containers ||
+          new Set(v.containers.map((s) => s.name)).size !== v.containers.length ||
+          new Set(v.containers.map((s) => s.service)).size !== v.containers.length ||
+          new Set(v.containers.map((s) => s.role)).size !== v.containers.length
+        : v.containers !== undefined
+    )
+      c.addIssue({
+        code: 'custom',
+        message: 'Selecione containers e papéis explícitos, sem duplicação.',
       });
   });
 export const dockerMountSchema = z.strictObject({
@@ -53,6 +100,9 @@ export const dockerCatalogSchema = z.strictObject({
         state: z.string().max(32),
         mounts: z.array(dockerMountSchema).max(100),
         blockedReason: z.string().max(500).nullable(),
+        composeProject: dockerNameSchema.optional(),
+        composeService: dockerNameSchema.optional(),
+        environmentKeys: z.array(z.string()).max(1000).optional(),
       }),
     )
     .max(1000),
@@ -102,7 +152,7 @@ export const dockerEvidenceSchema = z
         }),
       )
       .min(1)
-      .max(102),
+      .max(104),
   })
   .superRefine((v, c) => {
     const names = v.artifacts.map((f) => f.name);
@@ -121,9 +171,11 @@ export const dockerEvidenceSchema = z
         message: 'Application requires historical image and encrypted configuration',
       });
     if (
-      v.selection.kind === 'swarm' &&
+      ['swarm', 'compose'].includes(v.selection.kind) &&
       (!names.includes('config.enc') ||
-        v.selection.services?.some((_, i) => !names.includes(`image-${i}.tar`)))
+        (v.selection.services ?? v.selection.containers)?.some(
+          (_, i) => !names.includes(`image-${i}.tar`),
+        ))
     )
       c.addIssue({
         code: 'custom',
@@ -146,7 +198,7 @@ export const dockerRestoreInputSchema = z
   );
 export const dockerRestoredSchema = z.strictObject({
   targetName: dockerNameSchema,
-  kind: z.enum(['volume', 'directory', 'container', 'swarm']),
+  kind: z.enum(['volume', 'directory', 'container', 'swarm', 'compose']),
   services: z
     .array(z.strictObject({ id: z.string(), role: z.string(), image: z.string() }))
     .optional(),

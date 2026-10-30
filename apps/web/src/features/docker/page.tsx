@@ -1,4 +1,4 @@
-import { useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { useForm } from 'react-hook-form';
 import { zodResolver } from '@hookform/resolvers/zod';
@@ -74,9 +74,13 @@ const kinds = {
   volume: 'Volume nomeado',
   directory: 'Diretório aprovado',
   swarm: 'Aplicação Swarm (grupo de serviços)',
+  compose: 'Aplicação Compose (grupo de containers)',
 };
 type SwarmRole = 'frontend' | 'api' | 'worker';
-export function DockerPage() {
+export function DockerPage({
+  profileVersionId,
+  serverId: initialServerId,
+}: { profileVersionId?: string | undefined; serverId?: string | undefined } = {}) {
   const identity = ProtectedRoute.useRouteContext().identity,
     role = identity.status === 'ok' ? identity.session.role : 'viewer',
     canConfigure = identity.status === 'ok' && identity.session.canConfigure,
@@ -84,8 +88,10 @@ export function DockerPage() {
     canRestore = ['administrator', 'restore_operator'].includes(role);
   const cache = useQueryClient(),
     refresh = () => cache.invalidateQueries({ queryKey: ['docker'] });
-  const [serverId, setServerId] = useState(''),
-    [kind, setKind] = useState<'container' | 'volume' | 'directory' | 'swarm'>('container'),
+  const [serverId, setServerId] = useState(initialServerId ?? ''),
+    [kind, setKind] = useState<'container' | 'volume' | 'directory' | 'swarm' | 'compose'>(
+      'container',
+    ),
     [swarmName, setSwarmName] = useState('aplicacao'),
     [swarmMembers, setSwarmMembers] = useState<
       Record<
@@ -100,6 +106,11 @@ export function DockerPage() {
     [restorePoint, setRestorePoint] = useState<Point | null>(null);
   const [restoreAvailable, setRestoreAvailable] = useState(false);
   const restoreTrigger = useRef<HTMLButtonElement | null>(null);
+  useEffect(() => {
+    if (initialServerId) setServerId(initialServerId);
+    setPointPage(1);
+    setSelected(null);
+  }, [initialServerId, profileVersionId]);
   const servers = useQuery({
     queryKey: ['docker', 'servers'],
     queryFn: () => configurationRequest('options?kind=servers', optionsResultSchema),
@@ -116,8 +127,13 @@ export function DockerPage() {
     refetchInterval: 30000,
   });
   const overview = useQuery({
-    queryKey: ['docker', 'overview'],
-    queryFn: () => request('overview', overviewSchema),
+    queryKey: ['docker', 'overview', profileVersionId],
+    queryFn: () =>
+      request(
+        'overview' +
+          (profileVersionId ? '?profileVersionId=' + encodeURIComponent(profileVersionId) : ''),
+        overviewSchema,
+      ),
     refetchInterval: 3000,
   });
   const planForm = useForm<
@@ -159,6 +175,14 @@ export function DockerPage() {
         ...(kind === 'swarm'
           ? { services: Object.entries(swarmMembers).map(([id, member]) => ({ id, ...member })) }
           : {}),
+        ...(kind === 'compose'
+          ? {
+              containers: Object.entries(swarmMembers).map(([id, member]) => {
+                const c = catalog.data?.containers.find((c) => c.id === id);
+                return { id, name: c?.name, service: c?.composeService, ...member };
+              }),
+            }
+          : {}),
       }),
     onSuccess: (data, name) => {
       setSelected({ profileVersionId: data.profileVersionId, identity: name });
@@ -195,6 +219,12 @@ export function DockerPage() {
     },
   });
   const error = [select.error, plan.error, backup.error, restore.error].find(Boolean);
+  const groupCandidates =
+    kind === 'compose'
+      ? (catalog.data?.containers ?? [])
+          .filter((c) => c.composeProject === swarmName && c.composeService)
+          .map((c) => ({ id: c.id, name: c.name, environmentKeys: c.environmentKeys }))
+      : (catalog.data?.services ?? []);
   const records =
     (kind === 'container'
       ? catalog.data?.containers.map((c) => ({
@@ -225,11 +255,10 @@ export function DockerPage() {
     restore.reset();
     restoreForm.reset({
       recoveryPointId: point.id,
-      targetName:
-        point.selection.kind === 'container' || point.selection.kind === 'swarm'
-          ? point.selection.identity
-          : point.selection.identity + '-recuperado',
-      replaceContainer: point.selection.kind === 'container' || point.selection.kind === 'swarm',
+      targetName: ['container', 'swarm', 'compose'].includes(point.selection.kind)
+        ? point.selection.identity
+        : point.selection.identity + '-recuperado',
+      replaceContainer: ['container', 'swarm', 'compose'].includes(point.selection.kind),
       confirmation: '',
       idempotencyKey: crypto.randomUUID(),
       redeployGuardConfirmed: false,
@@ -322,20 +351,26 @@ export function DockerPage() {
           />
         ) : (
           <>
-            {kind === 'swarm' && (
+            {(kind === 'swarm' || kind === 'compose') && (
               <fieldset className="space-y-3 rounded-md border p-3">
                 <legend className="px-1 font-semibold">Grupo da aplicação</legend>
                 <p className="text-sm text-muted-foreground">
                   Selecione até três serviços e confirme seus papéis. O banco e serviços de outras
                   aplicações ficam fora deste grupo.
                 </p>
-                <Label htmlFor="swarm-name">Nome do grupo</Label>
+                <Label htmlFor="swarm-name">
+                  {kind === 'compose' ? 'Projeto Compose exato' : 'Nome do grupo'}
+                </Label>
                 <Input
                   id="swarm-name"
                   value={swarmName}
-                  onChange={(e) => setSwarmName(e.target.value)}
+                  onChange={(e) => {
+                    setSwarmName(e.target.value);
+                    setSelected(null);
+                    if (kind === 'compose') setSwarmMembers({});
+                  }}
                 />
-                {catalog.data?.services.map((service) => {
+                {groupCandidates.map((service) => {
                   const member = swarmMembers[service.id];
                   return (
                     <div className="space-y-3 rounded-md border p-3" key={service.id}>
@@ -442,8 +477,12 @@ export function DockerPage() {
                     </div>
                   );
                 })}
-                {!catalog.data?.services.length && (
-                  <p role="status">Nenhum serviço Swarm disponível nesta descoberta.</p>
+                {!groupCandidates.length && (
+                  <p role="status">
+                    {kind === 'compose'
+                      ? 'Informe o projeto exato para listar seus containers.'
+                      : 'Nenhum serviço Swarm disponível nesta descoberta.'}
+                  </p>
                 )}
                 {new Set(Object.values(swarmMembers).map((v) => v.role)).size !==
                   Object.keys(swarmMembers).length && (
@@ -461,11 +500,11 @@ export function DockerPage() {
                   }
                   onClick={() => select.mutate(swarmName)}
                 >
-                  Selecionar grupo Swarm
+                  Selecionar grupo {kind === 'compose' ? 'Compose' : 'Swarm'}
                 </Button>
               </fieldset>
             )}
-            {kind !== 'swarm' && (
+            {kind !== 'swarm' && kind !== 'compose' && (
               <>
                 <div className="flex flex-wrap items-end gap-3">
                   <div className="min-w-0 flex-1">
@@ -730,6 +769,23 @@ export function DockerPage() {
                     <p className="break-all text-xs text-muted-foreground">
                       Inclui: {p.evidence.components.join(', ')}
                     </p>
+                    {p.selection.containers?.map((member) => (
+                      <p key={member.name} className="break-all text-xs text-muted-foreground">
+                        {member.role === 'frontend'
+                          ? 'Interface'
+                          : member.role === 'api'
+                            ? 'API'
+                            : 'Worker'}
+                        : {member.name}
+                        {member.restoreStartup ? ' · inicialização de retorno revisada' : ''}
+                        {member.emptyReadOnlyMounts?.length
+                          ? ` · diretórios auxiliares recriados vazios: ${member.emptyReadOnlyMounts.join(', ')}`
+                          : ''}
+                        {member.ephemeralPaths?.length
+                          ? ` · caches descartados: ${member.ephemeralPaths.join(', ')}`
+                          : ''}
+                      </p>
+                    ))}
                     <Badge variant="outline">Restic e componentes verificados</Badge>
                     <PointDestinationStatus
                       pointId={p.id}
@@ -746,7 +802,7 @@ export function DockerPage() {
                       }}
                     >
                       <ArchiveRestore aria-hidden="true" />
-                      {p.selection.kind === 'container' || p.selection.kind === 'swarm'
+                      {['container', 'swarm', 'compose'].includes(p.selection.kind)
                         ? 'Voltar aplicação sem banco'
                         : 'Restaurar para novo destino'}
                     </Button>
@@ -783,7 +839,7 @@ export function DockerPage() {
                   {r.evidence && (
                     <p className="mt-2 break-all text-xs text-muted-foreground">
                       Destino: {r.evidence.targets.join(', ')}.{' '}
-                      {r.evidence.kind === 'swarm'
+                      {['swarm', 'compose'].includes(r.evidence.kind)
                         ? 'Grupo Swarm retornado. Confira o estado dos serviços antes de reativar deploys externos. Banco não alterado.'
                         : r.evidence.kind === 'container'
                           ? `Container em execução (${r.evidence.health === 'healthy' ? 'healthcheck aprovado' : 'sem healthcheck configurado'}). Original preservado: ${r.evidence.preservedContainerId}. Banco permanece uma ação independente.`
@@ -819,12 +875,12 @@ export function DockerPage() {
           <DialogHeader>
             <DialogTitle>
               {restorePoint?.selection.kind === 'container' ||
-              restorePoint?.selection.kind === 'swarm'
+              ['swarm', 'compose'].includes(restorePoint?.selection.kind ?? '')
                 ? 'Voltar aplicação sem banco'
                 : 'Restaurar arquivos em destino novo'}
             </DialogTitle>
             <DialogDescription>
-              {restorePoint?.selection.kind === 'swarm'
+              {['swarm', 'compose'].includes(restorePoint?.selection.kind ?? '')
                 ? 'Esta ação volta somente os serviços selecionados e seus arquivos. O banco não será restaurado. Desative deploys automáticos, webhooks e agendas externas antes de confirmar.'
                 : restorePoint?.selection.kind === 'container'
                   ? 'Esta ação para somente o container identificado, volta imagem/configuração e arquivos históricos, e inicia o substituto. O original e seus dados ficam preservados. O banco não será restaurado.'
@@ -845,7 +901,7 @@ export function DockerPage() {
             )}
             <Label htmlFor="docker-target">
               {restorePoint?.selection.kind === 'container' ||
-              restorePoint?.selection.kind === 'swarm'
+              ['swarm', 'compose'].includes(restorePoint?.selection.kind ?? '')
                 ? 'Container alvo'
                 : 'Nome do novo destino'}
             </Label>
@@ -853,12 +909,12 @@ export function DockerPage() {
               id="docker-target"
               readOnly={
                 restorePoint?.selection.kind === 'container' ||
-                restorePoint?.selection.kind === 'swarm'
+                ['swarm', 'compose'].includes(restorePoint?.selection.kind ?? '')
               }
               {...restoreForm.register('targetName')}
             />
             {(restorePoint?.selection.kind === 'container' ||
-              restorePoint?.selection.kind === 'swarm') && (
+              ['swarm', 'compose'].includes(restorePoint?.selection.kind ?? '')) && (
               <>
                 <Label htmlFor="docker-confirm">
                   Digite o nome exato para confirmar a parada e o retorno
@@ -870,7 +926,7 @@ export function DockerPage() {
                 />
               </>
             )}
-            {restorePoint?.selection.kind === 'swarm' && (
+            {['swarm', 'compose'].includes(restorePoint?.selection.kind ?? '') && (
               <Label className="flex items-start gap-2">
                 <input type="checkbox" {...restoreForm.register('redeployGuardConfirmed')} />
                 Desativei redeploys, webhooks e agendas externas. Vou alinhar a configuração

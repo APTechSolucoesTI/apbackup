@@ -8,6 +8,7 @@ import { createRuntimeApi } from './execution.server.js';
 import { createPostgresApi } from './postgresql.server.js';
 import { createDockerApi } from './docker.server.js';
 import { createDokployApi } from './dokploy.server.js';
+import { createSystemsApi } from './systems.server.js';
 let runtime: ReturnType<typeof initialize> | undefined;
 function initialize() {
   const databaseURL = process.env.DATABASE_URL;
@@ -31,6 +32,7 @@ function initialize() {
     postgresHandler: createPostgresApi(db, sessions.requireSession, baseURL),
     dockerHandler: createDockerApi(db, sessions.requireSession, baseURL),
     dokployHandler: createDokployApi(db, sessions.requireSession, baseURL),
+    systemsHandler: createSystemsApi(db, sessions.requireSession, baseURL),
     handler: createAuthApi(auth, db),
     consoleHandler: createConsoleApi(auth, db),
     configurationHandler: createConfigurationApi(auth, db),

@@ -96,6 +96,7 @@ export const destinationCredentialSchema = z.strictObject({
       token_type: z.literal('Bearer'),
       refresh_token: line.min(1),
       expiry: z.iso.datetime({ offset: true }),
+      expires_in: z.number().int().positive().optional(),
     })
     .optional(),
 });

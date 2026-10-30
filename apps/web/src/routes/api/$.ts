@@ -2,6 +2,8 @@ import { createFileRoute } from '@tanstack/react-router';
 import { getAuthRuntime } from '@/lib/runtime.server';
 const handle = ({ request }: { request: Request }) => {
   const runtime = getAuthRuntime();
+  if (new URL(request.url).pathname.startsWith('/api/systems/'))
+    return runtime.systemsHandler(request);
   if (new URL(request.url).pathname.startsWith('/api/dokploy/'))
     return runtime.dokployHandler(request);
   if (new URL(request.url).pathname.startsWith('/api/docker/'))

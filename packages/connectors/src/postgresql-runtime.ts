@@ -15,9 +15,12 @@ import {
 import { trustedDirectory, safePath } from './runtime/safe-path.js';
 import { spawnTool, type AllowedTool } from './runtime/spawn-tool.js';
 import { postgresClient } from './postgresql-connection.js';
+import { dockerPostgresTransport, type PostgresDockerPolicy } from './postgresql-docker.js';
+import type { PostgresQueryClient } from './postgresql-schemas.js';
 import { inspectPostgresSchemaScope } from './postgresql-schemas.js';
+import { requiresCompatibleSupabaseCluster } from './postgresql-compatibility.js';
 import { assertCommandActive, CommandDeadlineError } from './runtime/command-deadline.js';
-export interface PostgresPolicy {
+export interface PostgresPolicy extends PostgresDockerPolicy {
   allowedHosts: readonly string[];
   repositoryRoot: string;
   mountedRoots?: readonly string[] | undefined;
@@ -52,7 +55,18 @@ export async function runPostgresCommand(
   const scoped = postgresRuntimeSecretsSchema.parse(await context.resolvePostgres(command)),
     connection = scoped.connection;
   active();
-  if (!policy.allowedHosts.includes(connection.host)) throw new Error('Unapproved database host');
+  if (connection.transport !== 'docker_exec' && !policy.allowedHosts.includes(connection.host))
+    throw new Error('Unapproved database host');
+  const docker =
+    connection.transport === 'docker_exec'
+      ? dockerPostgresTransport(
+          connection,
+          policy,
+          command.commandId,
+          context.signal,
+          Date.parse(command.expiresAt),
+        )
+      : undefined;
   if (!/^[A-Za-z0-9][A-Za-z0-9_-]{0,99}$/.test(scoped.repositoryPath))
     throw new Error('Dedicated relative repository key required');
   await trustedDirectory(policy.repositoryRoot, { private: true });
@@ -74,27 +88,38 @@ export async function runPostgresCommand(
         context,
       )
     : undefined;
-  const pgpass = join(stage, 'connection.pgpass'),
+  const pgpass = docker ? undefined : join(stage, 'connection.pgpass'),
     escape = (v: string) => v.replaceAll('\\', '\\\\').replaceAll(':', '\\:');
-  await writeFile(
-    pgpass,
-    [connection.host, String(connection.port), '*', connection.username, connection.password]
-      .map(escape)
-      .join(':') + '\n',
-    { flag: 'wx', mode: 0o600 },
-  );
+  if (pgpass)
+    await writeFile(
+      pgpass,
+      [connection.host, String(connection.port), '*', connection.username, connection.password]
+        .map(escape)
+        .join(':') + '\n',
+      { flag: 'wx', mode: 0o600 },
+    );
   const environment = {
     PGHOST: connection.host,
     PGPORT: String(connection.port),
     PGUSER: connection.username,
     PGDATABASE: scoped.database,
-    PGPASSFILE: pgpass,
+    ...(pgpass ? { PGPASSFILE: pgpass } : {}),
     PGSSLMODE: connection.sslMode,
     PGSSLROOTCERT: '/etc/ssl/certs/ca-certificates.crt',
     RESTIC_PASSWORD: scoped.repositoryPassword,
   };
   const run = async (tool: AllowedTool, args: string[], artifact?: string) => {
     active();
+    if (docker && (tool === 'pg_dump' || tool === 'pg_restore')) {
+      const input = tool === 'pg_restore' ? args.at(-1) : undefined;
+      const output = await docker.execute(tool, input ? args.slice(0, -1) : args, {
+        database: environment.PGDATABASE,
+        artifact,
+        input,
+      });
+      active();
+      return output;
+    }
     const result = await spawnTool(tool, args, {
       cwd: stage,
       timeoutMs: Math.min(3600000, Date.parse(command.expiresAt) - Date.now()),
@@ -114,14 +139,17 @@ export async function runPostgresCommand(
   let phase: NonNullable<AgentResult['failureStage']> = 'connection';
   // Closing the active pg connection interrupts connect/query/CREATE/count work
   // when the same overall command budget expires.
-  const clients = new Set<ReturnType<typeof postgresClient>>();
+  type RuntimeClient = PostgresQueryClient & { connect(): Promise<unknown>; end(): Promise<void> };
+  const clients = new Set<RuntimeClient>();
   const abortSQL = () => {
     for (const client of clients) void client.end().catch(() => {});
   };
   context.signal.addEventListener('abort', abortSQL, { once: true });
   const connect = async (database: string) => {
     active();
-    const client = postgresClient(connection, database);
+    const client: RuntimeClient = docker
+      ? docker.client(database)
+      : postgresClient(connection, database);
     clients.add(client);
     await client.connect();
     active();
@@ -139,6 +167,16 @@ export async function runPostgresCommand(
       );
       if (Math.floor(version / 10000) !== 17)
         throw new Error('Matching PostgreSQL 17 runtime required');
+      if (docker) {
+        for (const tool of ['psql', 'pg_dump', 'pg_restore'] as const) {
+          const nativeVersion = await docker.execute(tool, ['--version'], {
+            database: scoped.database,
+          });
+          if (!new RegExp(`^${tool} \\(PostgreSQL\\) 17(?:\\.|\\s)`).test(nativeVersion))
+            throw new Error('Matching native PostgreSQL 17 tools required');
+          active();
+        }
+      }
       if (op.kind === 'postgresql_restore') {
         if (
           op.targetDatabase === scoped.database ||
@@ -177,7 +215,7 @@ export async function runPostgresCommand(
         archive,
       );
       phase = 'archive';
-      await run('pg_restore', ['--list', archive]);
+      const tableOfContents = await run('pg_restore', ['--list', archive]);
       phase = 'repository';
       let exists = false;
       try {
@@ -228,6 +266,7 @@ export async function runPostgresCommand(
         database: scoped.database,
         schemas: scoped.schemas,
         serverMajor: 17,
+        requiresCompatibleCluster: requiresCompatibleSupabaseCluster(tableOfContents),
         capturedAt,
         sha256: originalHash,
         sizeBytes: String((await stat(archive)).size),
@@ -252,7 +291,11 @@ export async function runPostgresCommand(
     const dump = await safePath(restored, 'database.dump');
     if ((await hashFile(dump, context.signal)) !== op.sha256)
       throw new Error('Snapshot artifact hash mismatch');
-    await run('pg_restore', ['--list', dump]);
+    const tableOfContents = await run('pg_restore', ['--list', dump]);
+    if (requiresCompatibleSupabaseCluster(tableOfContents))
+      throw new Error(
+        'Supabase recovery requires a compatible isolated cluster and original encryption keys',
+      );
     phase = 'target';
     // A new effect authorization immediately before CREATE. Never replay uncertain CREATE/restore.
     if (!context.authorizeEffect || !(await context.authorizeEffect(command)))
@@ -324,6 +367,7 @@ export async function runPostgresCommand(
     context.signal.removeEventListener('abort', abortSQL);
     for (const client of clients) await client.end().catch(() => {});
     await remote?.close();
-    await unlink(pgpass);
+    await docker?.close();
+    if (pgpass) await unlink(pgpass);
   }
 }

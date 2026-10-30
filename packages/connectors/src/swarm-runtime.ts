@@ -159,11 +159,15 @@ export async function runSwarmCommand(
     const mounts = services.flatMap((s) => s.Spec.TaskTemplate.ContainerSpec.Mounts ?? []);
     for (const s of services) {
       const c = s.Spec.TaskTemplate.ContainerSpec;
+      const startup = selected.find((member) => member.id === s.ID)?.restoreStartup;
       if (
         capture &&
         (isDatabase(c.Image) ||
           /\b(migrate|migration)\b|prisma[^\n]*deploy/i.test(
-            [...(c.Command ?? []), ...(c.Args ?? [])].join(' '),
+            [
+              ...(startup?.entrypoint ?? c.Command ?? []),
+              ...(startup?.command ?? c.Args ?? []),
+            ].join(' '),
           ))
       )
         throw new Error('Database/migrating startup requires a reviewed nonmigrating adapter');
@@ -312,6 +316,8 @@ export async function runSwarmCommand(
           join(stage, name),
         );
         const proof = await inspectDataTar(join(stage, name), context.signal);
+        if (proof.rootKind !== 'directory')
+          throw new Error('Single-file mounts require a dedicated restore adapter');
         data.push({ name, source: m.Source, type: m.Type, fingerprint: proof.fingerprint });
         await add(name);
       }
@@ -437,6 +443,20 @@ export async function runSwarmCommand(
       historical.some((s, i) => s.ID !== selected[i]!.id)
     )
       throw new Error('Historical target mismatch');
+    for (const [i, s] of historical.entries()) {
+      const c = s.Spec.TaskTemplate.ContainerSpec,
+        override = selected[i]!.restoreStartup;
+      if (
+        isDatabase(c.Image) ||
+        /\b(migrate|migration|migrations)\b|prisma[^\n]*deploy/i.test(
+          [
+            ...(override?.entrypoint ?? c.Command ?? []),
+            ...(override?.command ?? c.Args ?? []),
+          ].join(' '),
+        )
+      )
+        throw new Error('Historical startup requires a reviewed nonmigrating command');
+    }
     for (const d of index.data)
       if (
         (await inspectDataTar(await safePath(restored, d.name), context.signal)).fingerprint !==
@@ -486,6 +506,11 @@ export async function runSwarmCommand(
         ...env.filter((e) => keys.includes(e.split('=')[0]!)),
       ];
       spec.TaskTemplate.ContainerSpec.Image = index.images[i]!;
+      const startup = selected[i]!.restoreStartup;
+      if (startup) {
+        spec.TaskTemplate.ContainerSpec.Args = startup.command;
+        if (startup.entrypoint) spec.TaskTemplate.ContainerSpec.Command = startup.entrypoint;
+      }
       spec.TaskTemplate.ContainerSpec.Mounts = (spec.TaskTemplate.ContainerSpec.Mounts ?? []).map(
         (m) => {
           const source = targets.get(`${m.Type}:${m.Source}`);

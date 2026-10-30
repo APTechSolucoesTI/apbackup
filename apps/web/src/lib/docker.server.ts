@@ -85,6 +85,23 @@ export function createDockerApi(
           if (container.blockedReason) throw new ConfigurationError(409, container.blockedReason);
         }
         if (
+          v.kind === 'compose' &&
+          v.containers!.some(
+            (s) =>
+              !found.containers.some(
+                (c) =>
+                  c.name === s.name &&
+                  c.composeProject === v.identity &&
+                  c.composeService === s.service &&
+                  s.preserveEnvironmentKeys.every((key) => c.environmentKeys?.includes(key)),
+              ),
+          )
+        )
+          throw new ConfigurationError(
+            409,
+            'O projeto ou serviço Compose mudou. Atualize a descoberta e revise o grupo.',
+          );
+        if (
           v.kind === 'swarm' &&
           v.services?.some(
             (s) =>
@@ -194,17 +211,43 @@ export function createDockerApi(
           if (!point) throw new ConfigurationError(409, 'Ponto Docker indisponível.');
           const proof = dockerEvidenceSchema.parse(point.docker_evidence);
           if (
-            ['container', 'swarm'].includes(proof.selection.kind) &&
+            ['container', 'swarm', 'compose'].includes(proof.selection.kind) &&
             (!v.replaceContainer || v.targetName !== proof.selection.identity)
           )
             throw new ConfigurationError(
               400,
               'Confirme a substituição somente da aplicação selecionada. Banco é uma ação independente.',
             );
-          if (!['container', 'swarm'].includes(proof.selection.kind) && v.replaceContainer)
+          if (
+            !['container', 'swarm', 'compose'].includes(proof.selection.kind) &&
+            v.replaceContainer
+          )
             throw new ConfigurationError(400, 'Recurso de arquivos exige um destino novo.');
           let targetContainerId: string | null = null;
           let targetServices: { id: string; version: number }[] | undefined;
+          let targetContainers: { id: string; name: string }[] | undefined;
+          if (proof.selection.kind === 'compose') {
+            if (!v.redeployGuardConfirmed)
+              throw new ConfigurationError(
+                409,
+                'Pause os redeploys externos e confirme o procedimento antes do retorno.',
+              );
+            const current = await catalog(proof.selection.serverId);
+            targetContainers = proof.selection.containers!.map((s) => {
+              const target = current.containers.find(
+                (c) =>
+                  c.name === s.name &&
+                  c.composeProject === proof.selection.identity &&
+                  c.composeService === s.service,
+              );
+              if (!target)
+                throw new ConfigurationError(
+                  409,
+                  'Container Compose alvo indisponível ou identidade alterada.',
+                );
+              return { id: target.id, name: target.name };
+            });
+          }
           if (proof.selection.kind === 'swarm') {
             if (!v.redeployGuardConfirmed)
               throw new ConfigurationError(
@@ -241,6 +284,7 @@ export function createDockerApi(
             replaceContainer: v.replaceContainer,
             targetContainerId,
             ...(targetServices ? { targetServices, redeployGuardConfirmed: true } : {}),
+            ...(targetContainers ? { targetContainers, redeployGuardConfirmed: true } : {}),
           };
           const previous = (
             await c.query<{ id: string; scope: unknown }>(
@@ -291,22 +335,25 @@ export function createDockerApi(
         return Response.json({ executionId }, { headers });
       }
       if (path === '/overview' && request.method === 'GET') {
+        const profileVersionId = url.searchParams.has('profileVersionId')
+          ? uuidSchema.parse(url.searchParams.get('profileVersionId'))
+          : null;
         const plans = (
           await db.pool.query(
-            `select p.id,p.name,b.selection,(select jsonb_build_object('id',e.id,'status',e.status) from executions e where e.organization_id=p.organization_id and e.plan_id=p.id order by e.created_at desc,e.id limit 1) as latest from plans p join docker_bindings b on b.organization_id=p.organization_id and b.profile_version_id=p.profile_version_id where p.organization_id=$1 and p.archived_at is null order by p.created_at desc limit 100`,
-            [org],
+            `select p.id,p.name,b.selection,(select jsonb_build_object('id',e.id,'status',e.status) from executions e where e.organization_id=p.organization_id and e.plan_id=p.id order by e.created_at desc,e.id limit 1) as latest from plans p join docker_bindings b on b.organization_id=p.organization_id and b.profile_version_id=p.profile_version_id where p.organization_id=$1 and p.archived_at is null and ($2::uuid is null or p.profile_version_id=$2) order by p.created_at desc limit 100`,
+            [org, profileVersionId],
           )
         ).rows;
         const points = (
           await db.pool.query(
-            `select p.id,b.selection,p.captured_at as "capturedAt",d.docker_evidence as evidence from recovery_points p join docker_bindings b on b.organization_id=p.organization_id and b.profile_version_id=p.profile_version_id join destination_results d on d.organization_id=p.organization_id and d.recovery_point_id=p.id where p.organization_id=$1 and p.status='complete' and d.status='concluida' and d.verified_at is not null order by p.captured_at desc limit 100`,
-            [org],
+            `select p.id,b.selection,p.captured_at as "capturedAt",d.docker_evidence as evidence from recovery_points p join docker_bindings b on b.organization_id=p.organization_id and b.profile_version_id=p.profile_version_id join lateral (select x.docker_evidence from destination_results x where x.organization_id=p.organization_id and x.recovery_point_id=p.id and x.status='concluida' and x.verified_at is not null and x.removed_at is null and not x.retention_pending and x.docker_evidence is not null order by x.verified_at desc,x.id limit 1) d on true where p.organization_id=$1 and p.status='complete' and ($2::uuid is null or p.profile_version_id=$2) order by p.captured_at desc,p.id limit 100`,
+            [org, profileVersionId],
           )
         ).rows;
         const restores = (
           await db.pool.query(
-            `select e.id,r.scope->>'targetName' as "targetName",e.status,x.evidence from restore_requests r join executions e on e.organization_id=r.organization_id and e.id=r.execution_id left join restore_results x on x.organization_id=r.organization_id and x.request_id=r.id where r.organization_id=$1 and r.scope->>'kind'='docker_restore' order by e.created_at desc limit 100`,
-            [org],
+            `select e.id,r.scope->>'targetName' as "targetName",e.status,x.evidence from restore_requests r join executions e on e.organization_id=r.organization_id and e.id=r.execution_id left join restore_results x on x.organization_id=r.organization_id and x.request_id=r.id where r.organization_id=$1 and r.scope->>'kind'='docker_restore' and ($2::uuid is null or e.profile_version_id=$2) order by e.created_at desc limit 100`,
+            [org, profileVersionId],
           )
         ).rows;
         return Response.json({ plans, points, restores }, { headers });

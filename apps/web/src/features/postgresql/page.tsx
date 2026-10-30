@@ -55,6 +55,7 @@ const overviewSchema = z.object({
       capturedAt: z.string(),
       snapshotId: z.string(),
       verification: z.string(),
+      requiresCompatibleCluster: z.boolean().optional(),
     }),
   ),
   restores: z.array(z.object({ id: z.uuid(), database: z.string(), status: z.string() })),
@@ -89,7 +90,7 @@ async function pgRequest<T>(path: string, schema: z.ZodType<T>, value?: unknown)
   }
   return schema.parse(await response.json());
 }
-export function PostgresPage() {
+export function PostgresPage({ profileVersionId }: { profileVersionId?: string | undefined } = {}) {
   const session = ProtectedRoute.useRouteContext().identity;
   const canConfigure = session.status === 'ok' && session.session.canConfigure,
     role = session.status === 'ok' ? session.session.role : 'viewer';
@@ -125,8 +126,12 @@ export function PostgresPage() {
     enabled: canConfigure,
   });
   const overview = useQuery({
-    queryKey: ['postgresql', 'overview'],
-    queryFn: () => pgRequest('overview', overviewSchema),
+    queryKey: ['postgresql', 'overview', profileVersionId],
+    queryFn: () =>
+      pgRequest(
+        `overview${profileVersionId ? `?profileVersionId=${profileVersionId}` : ''}`,
+        overviewSchema,
+      ),
     refetchInterval: 3000,
   });
   const execution = useQuery({
@@ -759,7 +764,7 @@ export function PostgresPage() {
                         </div>
                         <Button
                           variant="outline"
-                          disabled={!canRestore}
+                          disabled={!canRestore || p.requiresCompatibleCluster}
                           onClick={(event) => {
                             restoreTrigger.current = event.currentTarget;
                             restoreForm.reset({
@@ -771,7 +776,9 @@ export function PostgresPage() {
                           }}
                         >
                           <ArchiveRestore aria-hidden="true" />
-                          Restaurar em banco novo
+                          {p.requiresCompatibleCluster
+                            ? 'Requer ambiente Supabase compatível'
+                            : 'Restaurar em banco novo'}
                         </Button>
                       </article>
                     ))}

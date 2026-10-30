@@ -22,6 +22,7 @@ import { trustedDirectory, safePath } from './runtime/safe-path.js';
 import { spawnTool } from './runtime/spawn-tool.js';
 import { assertCommandActive, CommandDeadlineError } from './runtime/command-deadline.js';
 import { runSwarmCommand } from './swarm-runtime.js';
+import { runComposeCommand } from './compose-runtime.js';
 export class DockerUnknownEffect extends Error {}
 export class DockerStageError extends Error {
   constructor(public readonly stage: NonNullable<AgentResult['failureStage']>) {
@@ -89,6 +90,8 @@ export async function runDockerCommand(
   active();
   if (scoped.selection.kind === 'swarm')
     return runSwarmCommand(command, context, policy, artifactRoot, scoped);
+  if (scoped.selection.kind === 'compose')
+    return runComposeCommand(command, context, policy, artifactRoot, scoped);
   await trustedDirectory(policy.repositoryRoot, { private: true });
   await trustedDirectory(artifactRoot, { private: true });
   const repository = await trustedDirectory(join(policy.repositoryRoot, scoped.repositoryPath), {
@@ -211,6 +214,8 @@ export async function runDockerCommand(
         );
         active();
         const proof = await inspectDataTar(join(stage, file), context.signal);
+        if (proof.rootKind !== 'directory')
+          throw new Error('Single-file mounts require the explicit Compose adapter');
         data.push({ file, mount, fingerprint: proof.fingerprint });
         await addFile(file);
       }

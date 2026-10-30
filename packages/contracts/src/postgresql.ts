@@ -37,15 +37,21 @@ export const postgresDatabaseNameSchema = z
     (v) => !['postgres', 'template0', 'template1'].includes(v.toLowerCase()),
     'Banco reservado. Escolha um banco de aplicação.',
   );
-export const postgresConnectionInputSchema = z.strictObject({
+const postgresConnectionFields = z.strictObject({
   serverId: uuidSchema,
   name: z.string().trim().min(1).max(200),
+  transport: z.enum(['tcp', 'docker_exec']).default('tcp'),
+  container: z
+    .string()
+    .regex(/^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$/)
+    .optional(),
   host: z
     .string()
     .trim()
     .min(1)
     .max(253)
-    .regex(/^[a-zA-Z0-9.-]+$/),
+    .regex(/^[a-zA-Z0-9.-]+$/)
+    .default('localhost'),
   port: z.number().int().min(1).max(65535).default(5432),
   username: z
     .string()
@@ -54,14 +60,24 @@ export const postgresConnectionInputSchema = z.strictObject({
     .regex(/^[A-Za-z_][A-Za-z0-9_.-]*$/),
   password: z
     .string()
-    .min(1)
     .max(4096)
-    .regex(/^[^\r\n\0]+$/),
+    .regex(/^[^\r\n\0]*$/)
+    .default(''),
   sslMode: z.enum(['verify-full', 'disable']).default('verify-full'),
 });
-export const postgresConnectionSchema = postgresConnectionInputSchema
+function validTransport(v: { transport: string; container?: string | undefined }) {
+  return v.transport === 'docker_exec' ? !!v.container : v.container === undefined;
+}
+export const postgresConnectionInputSchema = postgresConnectionFields
+  .refine(validTransport, 'Container exato obrigatório somente no transporte Docker local.')
+  .refine(
+    (v) => v.transport === 'docker_exec' || v.password.length > 0,
+    'Senha obrigatória para TCP.',
+  );
+export const postgresConnectionSchema = postgresConnectionFields
   .omit({ password: true })
-  .extend({ id: uuidSchema });
+  .extend({ id: uuidSchema })
+  .refine(validTransport);
 export const postgresSelectionSchema = z.strictObject({
   connectionId: uuidSchema,
   database: postgresSourceDatabaseSchema,
@@ -86,6 +102,7 @@ export const postgresEvidenceSchema = z.strictObject({
   database: postgresSourceDatabaseSchema,
   schemas: postgresSchemaScope,
   serverMajor: z.literal(17),
+  requiresCompatibleCluster: z.boolean().optional(),
   capturedAt: z.iso.datetime(),
   sha256: sha256Schema,
   sizeBytes: z.string().regex(/^\d+$/),
@@ -101,7 +118,10 @@ export const postgresRestoreEvidenceSchema = z.strictObject({
   verifiedAt: z.iso.datetime(),
 });
 export const postgresRuntimeSecretsSchema = z.strictObject({
-  connection: postgresConnectionInputSchema.omit({ name: true, serverId: true }),
+  connection: postgresConnectionFields
+    .omit({ name: true, serverId: true })
+    .refine(validTransport)
+    .refine((v) => v.transport === 'docker_exec' || v.password.length > 0),
   database: postgresSourceDatabaseSchema,
   schemas: postgresSchemaScope,
   repositoryPath: z.string().min(1),

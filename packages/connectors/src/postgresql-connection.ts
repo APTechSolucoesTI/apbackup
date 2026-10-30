@@ -3,7 +3,6 @@ import pg from 'pg';
 import { z } from 'zod';
 import type { PlatformDatabase } from '@apbackup/db';
 import {
-  postgresConnectionInputSchema,
   postgresConnectionSchema,
   postgresRuntimeSecretsSchema,
   type AgentCommand,
@@ -17,11 +16,13 @@ export function assertApprovedPostgresHost(host: string) {
   if (!allowed.includes(host)) throw new Error('PostgreSQL host is not approved');
 }
 export function postgresClient(
-  config:
-    | z.infer<typeof postgresConnectionInputSchema>
-    | z.infer<typeof postgresRuntimeSecretsSchema>['connection'],
+  config: Omit<z.infer<typeof postgresRuntimeSecretsSchema>['connection'], 'transport'> & {
+    transport?: 'tcp' | 'docker_exec';
+  },
   database: string,
 ) {
+  if (config.transport === 'docker_exec')
+    throw new Error('Docker-local PostgreSQL requires agent transport');
   if (config.sslMode === 'disable' && !['127.0.0.1', 'localhost'].includes(config.host))
     throw new Error('TLS required outside loopback');
   return new pg.Client({
@@ -65,7 +66,7 @@ export async function readPostgresConnection(
       id: string;
       server_id: string;
       configuration: unknown;
-      secret_reference_id: string;
+      secret_reference_id: string | null;
     }>(
       "select id,server_id,configuration,secret_reference_id from connections where organization_id=$1 and id=$2 and kind='postgresql'",
       [organizationId, id],
@@ -79,12 +80,15 @@ export async function readPostgresConnection(
   });
   return {
     ...config,
-    password: await readSecret(
-      db,
-      organizationId,
-      row.secret_reference_id,
-      'postgresql-connection',
-    ),
+    password:
+      config.transport === 'docker_exec'
+        ? ''
+        : await readSecret(
+            db,
+            organizationId,
+            row.secret_reference_id ?? '',
+            'postgresql-connection',
+          ),
   };
 }
 export async function resolvePostgresCommand(db: PlatformDatabase, command: AgentCommand) {
@@ -113,8 +117,8 @@ export async function resolvePostgresCommand(db: PlatformDatabase, command: Agen
   if (!row) throw new Error('PostgreSQL binding unavailable');
   const connection = await readPostgresConnection(db, command.organizationId, row.connection_id);
   if (!connection) throw new Error('Connection unavailable');
-  assertApprovedPostgresHost(connection.host);
-  const { host, port, username, password, sslMode } = connection;
+  if (connection.transport !== 'docker_exec') assertApprovedPostgresHost(connection.host);
+  const { host, port, username, password, sslMode, transport, container } = connection;
   const repository = z
     .object({ secret: z.string().min(1) })
     .parse(
@@ -123,7 +127,7 @@ export async function resolvePostgresCommand(db: PlatformDatabase, command: Agen
       ),
     );
   return postgresRuntimeSecretsSchema.parse({
-    connection: { host, port, username, password, sslMode },
+    connection: { host, port, username, password, sslMode, transport, container },
     database: row.database_name,
     schemas: row.schema_names,
     repositoryPath: /[^A-Za-z0-9_-]/.test(row.root_path)

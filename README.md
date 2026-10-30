@@ -2,6 +2,14 @@
 
 Este diretório contém contratos TypeScript/Zod, catálogo privado PostgreSQL,
 autenticação/autorização, console web TanStack Start, coordenador e agente Linux.
+Em **Sistemas**, pastas persistentes vinculam planos existentes de aplicação,
+bancos e arquivos de um mesmo servidor. Cada componente mostra agenda, retenção,
+execução e resultados por destino do próprio plano. O botão **Backup agora**
+solicita uma vez cada plano distinto da pasta, em uma transação auditada e
+idempotente. Configurar pastas exige a autorização administrativa e segundo fator
+já usados pelo catálogo; criar uma pasta não cria planos nem ativa agendas.
+Dependências externas e planos compartilhados devem ser descritos no escopo.
+O catálogo original de perfis continua em **Catálogo avançado de perfis**.
 Oferece backup lógico PostgreSQL 17 e retorno independente de containers,
 grupos Swarm aprovados, volumes e arquivos, com cópias Restic verificadas por
 destino. PBS/Proxmox permanecem fora do produto.
@@ -364,6 +372,10 @@ O runtime certificado é **PostgreSQL 17 → pg_dump 17 → pg_restore 17 → Po
 
 Configure `POSTGRES_ALLOWED_HOSTS` no servidor com os hosts exatos aprovados. O agente deve incluir o mesmo host em `postgresql.allowedHosts`. Use TLS com certificado verificado para origens remotas; `disable` é aceito apenas para loopback. Certificados privados precisam ser confiáveis no Node do servidor/agente e no bundle `/etc/ssl/certs/ca-certificates.crt` do runtime. A conta PostgreSQL precisa de CONNECT e leitura suficiente para `pg_dump`; para restauração também CREATEDB e criação dos objetos necessários. Não conceda superusuário apenas por conveniência.
 
+Para bancos PostgreSQL 17 já executados em Docker no host do agente, o instalador administrativo local pode provisionar uma conexão com `transport: "docker_exec"`, `container` com o nome exato e `username`, sem senha nem referência fictícia de segredo. Configure `postgresql.dockerSocketPath` e `postgresql.allowedDockerContainers` na configuração privada do agente. A aplicação web recusa cadastro/descoberta Docker: não acessa o socket do agente. Este transporte usa o socket Unix PostgreSQL dentro do container permitido, vincula o nome ao ID completo e executa somente `psql`, `pg_dump` e `pg_restore`, com prazo de processo, saída limitada e cancelamento dos próprios backends identificados. O container deve fornecer esses utilitários e `timeout` (GNU ou BusyBox). O transporte TCP conserva sua lista de hosts e a exigência de TLS remoto.
+
+O dump lógico binário é transmitido para o staging privado do agente, verificado por `pg_restore --list`, protegido com Restic e lido novamente para conferir o hash. A volta usa somente banco novo, com nova autorização antes de `CREATE DATABASE`; banco de origem e vizinhos existentes são recusados como destino. Um banco Supabase compartilhado deve ser identificado como compartilhado e protegido inteiro quando houver dependências entre schemas. O snapshot não inclui roles globais nem arquivos externos. `node scripts/postgresql-docker-runtime.mjs` testa captura/Restic/retorno de cinco schemas compartilhados, preservação de origem/vizinho, colisões e cancelamento em PostgreSQL 17 descartável. Requer a imagem `apbackup-postgresql-runtime:17` construída pelo comando `pnpm test:postgresql`.
+
 Além dos campos normais da inscrição do agente, adicione:
 
 ```json
@@ -434,7 +446,7 @@ O agente exige manager acessível, todas as réplicas no seu nó e mounts própr
 
 **Antes de Voltar grupo sem banco**, desative redeploy automático, webhooks e outros reconciliadores externos do grupo no Dokploy/pipeline; confira tarefas em andamento e confirme esse preparo na interface. Digite o nome exato do grupo. O retorno restaura/compara arquivos em volumes novos, carrega as imagens históricas e atualiza somente os IDs confirmados com controle de versão. Mantém valores atuais das chaves marcadas (conexão/chaves de banco/Redis); as demais configurações voltam ao histórico. Verifica imagem, ambiente esperado, mounts efetivos, execução e healthchecks configurados. Sem healthcheck, o resultado comprova execução, não todo o comportamento de negócio. Fonte/vizinhos permanecem intactos; não há restore de banco, fila ou DNS. Atualização parcial/incerta requer inspeção manual, sem replay ou rollback cego.
 
-O retorno por agente altera o estado desejado **Swarm**, sem reescrever o estado desejado **Dokploy**. Antes de reativar qualquer redeploy, alinhe no painel nativo as imagens históricas, ambiente e novos mounts, ou prepare explicitamente o retorno ao estado anterior. Um deploy Git posterior pode substituir o retorno se esse passo for ignorado. O preparo é confirmado pelo operador; não há garantia automática de bloquear controladores externos. Compose é descoberto e pode usar backup nativo de volumes; não há reconstrução universal de Compose/APMail/Expertex. Startup Expertex com Prisma migrations exige estratégia sem migrações antes de admitir retorno.
+O retorno por agente altera o estado desejado **Swarm**, sem reescrever o estado desejado **Dokploy**. Antes de reativar qualquer redeploy, alinhe no painel nativo as imagens históricas, ambiente e novos mounts, ou prepare explicitamente o retorno ao estado anterior. Um deploy Git posterior pode substituir o retorno se esse passo for ignorado. O preparo é confirmado pelo operador; não há garantia automática de bloquear controladores externos. Conjuntos Compose explícitos também podem proteger e retornar imagens, configuração cifrada e mounts próprios: consulte [semântica, omissões e limites de Compose](docs/compose-recovery.md). Não há reconstrução universal de compose.yaml ou de infraestrutura externa. Startups com migrations exigem um `restoreStartup` sem migrações explicitamente revisado, tanto em Compose quanto em Swarm.
 
 Em **PostgreSQL**, descubra schemas da conexão real, marque o escopo e crie um plano independente. `pg_dump --schema` captura os schemas selecionados e a evidência fica vinculada ao mesmo escopo. Dependências externas catalogadas (incluindo auth/storage/vault, extensões e papéis de políticas) bloqueiam a captura parcial automática; SQL dinâmico e integrações externas exigem revisão manual. Schemas gerenciados Supabase não são selecionáveis como um schema comum. Uma API Key REST Supabase não substitui credenciais/permissões PostgreSQL. É possível escolher backup do banco inteiro, inclusive fonte `postgres`, para recuperação isolada; extensão/roles globais ainda precisam existir no destino compatível. Todo restore continua criando **banco novo**, sem limpar ou sobrescrever schemas do compartilhado. Owners/grants originais não são reaplicados.
 

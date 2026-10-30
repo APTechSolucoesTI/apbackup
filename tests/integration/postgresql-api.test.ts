@@ -3,6 +3,7 @@ import { randomBytes, randomUUID } from 'node:crypto';
 import { runtimeFixture } from './runtime-fixture.js';
 import type { SessionPrincipal } from '../../packages/security/src/authorization.js';
 import { createPostgresApi } from '../../apps/web/src/lib/postgresql.server.js';
+import { readPostgresConnection } from '../../packages/connectors/src/postgresql-connection.js';
 let f: Awaited<ReturnType<typeof runtimeFixture>>;
 beforeAll(async () => {
   f = await runtimeFixture();
@@ -12,6 +13,49 @@ beforeAll(async () => {
 });
 afterAll(async () => {
   await f?.db.close();
+});
+
+test('locally provisioned Docker PostgreSQL needs no password and web discovery fails closed', async () => {
+  const id = randomUUID();
+  const configuration = {
+    name: 'Local provisioned',
+    transport: 'docker_exec',
+    container: 'supabase-db',
+    username: 'postgres',
+  };
+  await f.db.pool.query(
+    "insert into connections(id,organization_id,server_id,kind,endpoint,configuration) values($1,$2,$3,'postgresql',$4,$5)",
+    [id, f.org, f.server, 'docker-exec:supabase-db', JSON.stringify(configuration)],
+  );
+  const read = await readPostgresConnection(f.db, f.org, id);
+  expect(read?.transport).toBe('docker_exec');
+  expect(read?.container).toBe('supabase-db');
+  expect(read?.password).toBe('');
+  const principal: SessionPrincipal = {
+    organizationId: f.org,
+    userId: randomUUID(),
+    membershipId: randomUUID(),
+    sessionId: randomUUID(),
+    role: 'administrator',
+    reauthenticatedAt: new Date(),
+    mfaVerifiedAt: new Date(),
+  };
+  const api = createPostgresApi(f.db, async () => principal, 'https://console.example.test');
+  for (const [path, body] of [
+    [`/connections/${id}/discover`, {}],
+    ['/select', { connectionId: id, database: 'postgres' }],
+    ['/connections', { ...configuration, serverId: f.server }],
+  ] as const) {
+    const response = await api(
+      new Request(`https://console.example.test/api/postgresql${path}`, {
+        method: 'POST',
+        headers: { origin: 'https://console.example.test', 'content-type': 'application/json' },
+        body: JSON.stringify(body),
+      }),
+    );
+    expect(response.status).toBe(409);
+    expect((await response.json()).error).toMatch(/instalador/);
+  }
 });
 test('API discovers before profiles, binds selected database immutably, configures real plan and denies viewer/foreign access', async () => {
   let principal: SessionPrincipal = {
